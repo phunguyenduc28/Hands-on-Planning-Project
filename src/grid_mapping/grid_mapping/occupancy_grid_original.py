@@ -116,7 +116,7 @@ class GridMap:
     def log_odds_to_probability(self, log_odds):
         # If log_odds is near 0, it means we have no information (Unknown)
         if abs(log_odds) < 0.01:
-            return -1
+            return 50 # uncertain
         
         prob = 1.0 / (1.0 + np.exp(-log_odds))
         val = int(prob * 100)
@@ -138,50 +138,41 @@ class GridMap:
         """Get grid origin."""
         return self.origin
 
+
     def get_inflated_grid(self, inflation_radius_m):
-            """
-            Returns a version of the grid where occupied cells are expanded.
-            """
-            # Get the standard 0-100 grid
-            grid_data = self.get_occupancy_grid_array()
+        # Get the standard 0, 50, 100 grid
+        grid_data = self.get_occupancy_grid_array()
+        
+        radius_cells = int(math.ceil(inflation_radius_m / self.cell_size))
+        if radius_cells <= 0:
+            return grid_data
+
+        # Create the circular mask
+        y, x = np.ogrid[-radius_cells:radius_cells+1, -radius_cells:radius_cells+1]
+        mask = x**2 + y**2 <= radius_cells**2
+        
+        inflated_grid = grid_data.copy()
+        # Identify occupied cells
+        rows, cols = np.where(grid_data == 100)
+
+        for r, c in zip(rows, cols):
+            # Calculate boundaries for the map
+            r_start = max(0, r - radius_cells)
+            r_end = min(self.height, r + radius_cells + 1)
+            c_start = max(0, c - radius_cells)
+            c_end = min(self.width, c + radius_cells + 1)
             
-            # Calculate radius in cells
-            radius_cells = int(math.ceil(inflation_radius_m / self.cell_size))
-            if radius_cells <= 0:
-                return grid_data
-
-            # Create a circular mask for inflation
-            y, x = np.ogrid[-radius_cells:radius_cells+1, -radius_cells:radius_cells+1]
-            mask = x**2 + y**2 <= radius_cells**2
+            # Calculate boundaries for the mask (in case we are at map edges)
+            m_r_start = radius_cells - (r - r_start)
+            m_r_end = m_r_start + (r_end - r_start)
+            m_c_start = radius_cells - (c - c_start)
+            m_c_end = m_c_start + (c_end - c_start)
             
-            # Identify occupied cells (value 100)
-            occupied_mask = (grid_data == 100)
-            inflated_grid = grid_data.copy()
-
-            # Simple but effective inflation: 
-            # For every occupied cell, apply the circular mask
-            # Note: In a production environment, scipy.ndimage.binary_dilation is faster
-            rows, cols = np.where(occupied_mask)
-            for r, c in zip(rows, cols):
-                r_start = max(0, r - radius_cells)
-                r_end = min(self.height, r + radius_cells + 1)
-                c_start = max(0, c - radius_cells)
-                c_end = min(self.width, c + radius_cells + 1)
-                
-                # Slice the mask to fit map boundaries
-                mask_r_start = radius_cells - (r - r_start)
-                mask_r_end = mask_r_start + (r_end - r_start)
-                mask_c_start = radius_cells - (c - c_start)
-                mask_c_end = mask_c_start + (c_end - c_start)
-                
-                # Apply mask: if original is not already occupied, mark as inflated (e.g., 99 or 100)
-                inflated_grid[r_start:r_end, c_start:c_end] = np.maximum(
-                    inflated_grid[r_start:r_end, c_start:c_end], 
-                    mask[mask_r_start:mask_r_end, mask_c_start:mask_c_end] * 100
-                )
-                
-            return inflated_grid.astype(np.int8)
-
+            mask_slice = mask[m_r_start:m_r_end, m_c_start:m_c_end]
+            region = inflated_grid[r_start:r_end, c_start:c_end]
+            region[mask_slice] = 100 
+            
+        return inflated_grid.astype(np.int8)
 
 class OccupancyGridNode(Node):
     def __init__(self):
@@ -277,7 +268,7 @@ class OccupancyGridNode(Node):
         self.latest_scan = msg
         self.scan_received = True
         # self.update_grid_from_scan(msg)
-        self.get_logger().debug(f"Scan received: {len(msg.ranges)} ranges from frame '{msg.header.frame_id}'")
+        # self.get_logger().debug(f"Scan received: {len(msg.ranges)} ranges from frame '{msg.header.frame_id}'")
     
     def timer_callback(self):
         """Periodically update and publish occupancy grid."""
@@ -289,7 +280,7 @@ class OccupancyGridNode(Node):
             grid_min = np.min(self.grid_map.grid)
             grid_max = np.max(self.grid_map.grid)
             grid_mean = np.mean(self.grid_map.grid)
-            self.get_logger().info(f"Grid updated. Stats - Min: {grid_min:.2f}, Max: {grid_max:.2f}, Mean: {grid_mean:.2f}")
+            # self.get_logger().info(f"Grid updated. Stats - Min: {grid_min:.2f}, Max: {grid_max:.2f}, Mean: {grid_mean:.2f}")
         
         # Publish occupancy grid
         self.publish_occupancy_grid()
@@ -311,14 +302,7 @@ class OccupancyGridNode(Node):
                     timeout=rclpy.duration.Duration(seconds=0.5)
                 )
             except tf2_ros.TransformException:
-                # Fallback: use latest available transform (helps with timing issues)
-                self.get_logger().debug(f"Exact timestamp lookup failed, using latest available transform")
-                transform = self.tf_buffer.lookup_transform(
-                    self.map_frame,
-                    self.laser_frame,
-                    rclpy.time.Time(),  # Latest time
-                    timeout=rclpy.duration.Duration(seconds=0.5)
-                )
+                return
             
             # Robot position (same as laser in 2D environment) in map frame
             robot_x_map = transform.transform.translation.x
@@ -331,7 +315,7 @@ class OccupancyGridNode(Node):
             qw = transform.transform.rotation.w
             laser_yaw = self.quaternion_to_yaw(qx, qy, qz, qw)
             
-            self.get_logger().debug(f"Laser at ({robot_x_map:.2f}, {robot_y_map:.2f}), yaw={laser_yaw:.2f}")
+            # self.get_logger().debug(f"Laser at ({robot_x_map:.2f}, {robot_y_map:.2f}), yaw={laser_yaw:.2f}")
             
             # Process each beam
             min_range = 0.15
@@ -364,10 +348,10 @@ class OccupancyGridNode(Node):
                 if effective_range < min_range:
                     continue
                 
-                # beam_angle = laser_yaw - angle_laser
+                beam_angle = laser_yaw - angle_laser # run in simulation
 
                 # if map frame is world_enu
-                beam_angle = laser_yaw + angle_laser
+                # beam_angle = laser_yaw + angle_laser
                 
                 # If it's a max-range hit, only clear the path, don't mark an obstacle
                 if is_max_range:
@@ -382,7 +366,7 @@ class OccupancyGridNode(Node):
                     mark_occupied=not is_max_range
                 )
             
-            self.get_logger().info(f"Processed {valid_rays}/{len(ranges)} valid rays")
+            # self.get_logger().info(f"Processed {valid_rays}/{len(ranges)} valid rays")
         
         except tf2_ros.TransformException as ex:
             self.get_logger().error(f"CRITICAL: Transform lookup failed. Frames: '{self.laser_frame}' -> '{self.map_frame}'. Error: {ex}")

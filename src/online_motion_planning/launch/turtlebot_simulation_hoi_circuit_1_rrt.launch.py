@@ -11,7 +11,7 @@ def generate_launch_description():
     pkg_dir = get_package_share_directory('turtlebot_simulation')
     
     launch_file = os.path.join(pkg_dir, 'launch', 'turtlebot_basic.launch.py')
-    scenario_file = os.path.join(pkg_dir, 'scenarios', 'turtlebot_hoi_circuit2.scn')
+    scenario_file = os.path.join(pkg_dir, 'scenarios', 'turtlebot_hoi_circuit1.scn')
 
     # 2. Define the individual actions
     base_simulation = IncludeLaunchDescription(
@@ -53,13 +53,13 @@ def generate_launch_description():
             'map_frame': LaunchConfiguration('map_frame'),
             'base_frame': 'base_footprint',
             'laser_frame': 'turtlebot/rplidar',
-            'inflation_radius': 0.32
+            'inflation_radius': 0.28
         }]
     )
 
     rrt_planner_node = Node(
         package='online_motion_planning',
-        executable='rrt_tb',
+        executable='frontier_rrt_tb',
         name='rrt_planner',
         output='screen',
         parameters=[{

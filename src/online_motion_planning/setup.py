@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
                 'control_tb = online_motion_planning.control_tb:main',
                 'rrt_tb = online_motion_planning.rrt_tb:main',
+                'frontier_rrt_tb = online_motion_planning.frontier_rrt_tb:main'
         ],
     },
 )

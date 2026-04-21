@@ -25,8 +25,8 @@ class SamplingTurtlebot(Node):
         self.inflated_cost = 0.36 # inflated footprint larger than robot radius
         self.max_linear_velocity = 0.3
         self.max_angular_velocity = 0.3
-        self.kv = 1.5
-        self.kw = 1.5
+        self.kv = 1.0
+        self.kw = 1.0
 
         # Map variables
         self.map = None
@@ -98,13 +98,6 @@ class SamplingTurtlebot(Node):
 
         self.map = np.array(msg.data, dtype = float).reshape(num_cell_height, num_cells_width)
         self.map = np.where(self.map > 50, 1, 0)
-
-        # Convert the grid map from ROS format to binary (this might be slow due to the size of the map)
-        # self.map = np.where(self.map > 50, 1, 0)
-
-        # num_cells_wheel_base = int(self.inflated_cost / (2*self.resolution))
-
-        # self.map = self.inflate_map_cv2(map, num_cells_wheel_base)
 
     def path_planning_loop(self):
         if self.map is None or self.robot_pose is None or self.goal_pose is None:  
