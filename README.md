@@ -12,15 +12,5 @@ Copy the missing packages to the workspace.
 ## Run simulaton
 In the first terminal:
 ```bash
-ros2 launch turtlebot_simulation turtlebot_hoi_circuit2.launch.py
-```
-
-In the second terminal:
-```bash
-ros2 run grid_mapping occupancy_grid
-```
-
-In the third terminal:
-```bash
-ros2 run online_motion_planning rrt_tb
+ros2 launch online_motion_planning turtlebot_simulation_hoi_circuit_1_rrt.launch.py
 ```
