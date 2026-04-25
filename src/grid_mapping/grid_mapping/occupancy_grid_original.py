@@ -302,7 +302,14 @@ class OccupancyGridNode(Node):
                     timeout=rclpy.duration.Duration(seconds=0.5)
                 )
             except tf2_ros.TransformException:
-                return
+                # Fallback: use latest available transform (helps with timing issues)
+                self.get_logger().debug(f"Exact timestamp lookup failed, using latest available transform")
+                transform = self.tf_buffer.lookup_transform(
+                    self.map_frame,
+                    self.laser_frame,
+                    rclpy.time.Time(),  # Latest time
+                    timeout=rclpy.duration.Duration(seconds=0.5)
+                )
             
             # Robot position (same as laser in 2D environment) in map frame
             robot_x_map = transform.transform.translation.x

@@ -134,7 +134,7 @@ class SamplingTurtlebot(Node):
             area = stats[i, cv2.CC_STAT_AREA]
             (cX, cY) = centroids[i]
             # Ignore very small noise clusters
-            if area < 5:
+            if area < 2:
                 continue
 
             cost = self.frontier_cost(area, cX, cY)
