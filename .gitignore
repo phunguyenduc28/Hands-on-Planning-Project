@@ -1,0 +1,13 @@
+/build
+/install
+/log
+# /src/kobuki_description
+# /src/octomap_rviz_plugins
+# /src/scan_to_cloud2
+# /src/stonefish_ros2
+# /src/swiftpro
+# /src/swiftpro_description
+# /src/turtlebot
+# /src/turtlebot_description
+# /src/turtlebot_rviz
+# /src/turtlebot_simulation
