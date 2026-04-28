@@ -41,4 +41,6 @@ ros2 run online_motion_planning frontier_birrt_tb
 Add visualisation in Rviz as per your need.
 
 ## Workspace Build
+```bash
 colcon build --parallel-workers 2 --executor sequential --symlink-install
+```
