@@ -17,6 +17,8 @@ ros2 launch online_motion_planning turtlebot_simulation_hoi_circuit_1_rrt.launch
 
 ### NOTE - I am using my own localisation package which we developed for Hands-on-Localisation first lab which provides me the odometry
 
+Set up the RTAB mapping package first through the word file which I have provided.
+
 ## Running the RTAB mapping package
 Start the simulation in one terminal. In another terminal, start RTAB mapping with the following launch file after sourcing the workspace
 ```bash
