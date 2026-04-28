@@ -24,7 +24,7 @@ ros2 launch rtabmap_examples realsense_d435i_color.launch.py
 ```
 
 ## Inflated map
-In another terminal, start the node the generates inflated map
+In another terminal, after building the packages, start the node the generates inflated map
 ```bash
 ros2 run grid_mapping occupancy_grid_original 
 ```
