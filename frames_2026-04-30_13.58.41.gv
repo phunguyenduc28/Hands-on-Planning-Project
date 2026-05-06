@@ -1,0 +1,24 @@
+digraph G {
+"camera_link" -> "turtlebot/realsense_color"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"base_link" -> "wheel_left_link"[label=" Broadcaster: default_authority\nAverage rate: 14.885\nBuffer length: 4.501\nMost recent transform: 1777307114.081161\nOldest transform: 1777307109.580023\n"];
+"base_link" -> "wheel_right_link"[label=" Broadcaster: default_authority\nAverage rate: 14.885\nBuffer length: 4.501\nMost recent transform: 1777307114.081161\nOldest transform: 1777307109.580023\n"];
+"swiftpro/manipulator_base_link" -> "swiftpro/link1"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link1" -> "swiftpro/link2"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link1" -> "swiftpro/link6"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link8A" -> "swiftpro/link8B"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link3" -> "swiftpro/link8A"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link2" -> "swiftpro/link3"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link2" -> "swiftpro/link4"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link1" -> "swiftpro/link5"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link6" -> "swiftpro/link7"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"swiftpro/link8A" -> "swiftpro/link9"[label=" Broadcaster: default_authority\nAverage rate: 1.0\nBuffer length: 2.0\nMost recent transform: 1777307112.819335\nOldest transform: 1777307110.818998\n"];
+"odom" -> "base_footprint"[label=" Broadcaster: default_authority\nAverage rate: 21.362\nBuffer length: 2.902\nMost recent transform: 1777307114.10365\nOldest transform: 1777307111.201336\n"];
+"camera_link" -> "camera_depth_frame"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"camera_depth_frame" -> "camera_depth_optical_frame"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"camera_link" -> "camera_color_frame"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"camera_color_frame" -> "camera_color_optical_frame"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1777550321.6004848"[ shape=plaintext ] ;
+}->"camera_link";
+}

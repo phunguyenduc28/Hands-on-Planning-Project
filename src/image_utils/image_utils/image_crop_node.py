@@ -92,7 +92,7 @@ class ImageCropNode(Node):
             '/turtlebot/camera/depth/camera_info_cropped', 10)
 
     # Core crop logic
-    def crop_image_msg(self, msg: Image) -> Image:
+    def crop_image_msg(self, msg: Image, frame_id: str) -> Image:
         """Crop bottom fraction from a sensor_msgs/Image."""
         height = msg.height
         width  = msg.width
@@ -109,6 +109,7 @@ class ImageCropNode(Node):
 
         out = Image()
         out.header   = msg.header
+        out.header.frame_id = frame_id
         out.encoding = msg.encoding
         out.width    = width
         out.height   = keep_rows
@@ -117,7 +118,7 @@ class ImageCropNode(Node):
         out.data     = cropped_data
         return out
 
-    def crop_camera_info(self, msg: CameraInfo, new_height: int) -> CameraInfo:
+    def crop_camera_info(self, msg: CameraInfo, new_height: int, frame_id: str) -> CameraInfo:
         """
         Adjust CameraInfo for cropped image.
         Only the principal point cy changes — cropping the bottom
@@ -127,6 +128,7 @@ class ImageCropNode(Node):
         """
         out = CameraInfo()
         out.header = msg.header
+        out.header.frame_id = frame_id
         out.width  = msg.width
         out.height = new_height
 
@@ -144,20 +146,20 @@ class ImageCropNode(Node):
 
     # Callbacks
     def rgb_callback(self, msg: Image):
-        cropped = self.crop_image_msg(msg)
+        cropped = self.crop_image_msg(msg, frame_id = 'camera_color_optical_frame')
         self.rgb_pub.publish(cropped)
 
     def rgb_info_callback(self, msg: CameraInfo):
         new_height = int(msg.height * (1.0 - self.crop_frac))
-        self.rgb_info_pub.publish(self.crop_camera_info(msg, new_height))
+        self.rgb_info_pub.publish(self.crop_camera_info(msg, new_height, frame_id = 'camera_color_optical_frame'))
 
     def depth_callback(self, msg: Image):
-        cropped = self.crop_image_msg(msg)
+        cropped = self.crop_image_msg(msg, frame_id = 'camera_depth_optical_frame')
         self.depth_pub.publish(cropped)
 
     def depth_info_callback(self, msg: CameraInfo):
         new_height = int(msg.height * (1.0 - self.crop_frac))
-        self.depth_info_pub.publish(self.crop_camera_info(msg, new_height))
+        self.depth_info_pub.publish(self.crop_camera_info(msg, new_height, frame_id = 'camera_depth_optical_frame'))
 
 
 def main():

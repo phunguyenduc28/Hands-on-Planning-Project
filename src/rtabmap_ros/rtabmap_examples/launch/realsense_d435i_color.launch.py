@@ -5,6 +5,7 @@
 #   $ ros2 launch rtabmap_examples realsense_d435i_color.launch.py
 
 import os
+import math
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -12,7 +13,9 @@ from launch import LaunchDescription
 from launch_ros.actions import Node, SetParameter
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, Command, PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
 
 # def generate_launch_description():
 #     parameters=[{
@@ -34,6 +37,18 @@ from launch.substitutions import LaunchConfiguration
 #           ('rgb/camera_info', '/turtlebot/camera/color/camera_info'),
 #           ('depth/image', '/turtlebot/camera/depth/image_depth')]
 def generate_launch_description():
+    # Locate packages
+    pkg_turtlebot_desc = FindPackageShare('turtlebot_description')
+
+    # Process Xacro for robot description
+    robot_description_content = Command([
+        'xacro ',
+        PathJoinSubstitution([pkg_turtlebot_desc, 'urdf', 'turtlebot.urdf.xacro']),
+        ' mobile_base_namespace:=""',
+        ' manipulator_namespace:=swiftpro'
+    ])
+    robot_description = {'robot_description': ParameterValue(value=robot_description_content, value_type=str)}
+
     # Standard parameters for Stonefish simulation
     parameters=[{
           'frame_id': 'turtlebot/base_footprint',  # Match your localisation_node
@@ -43,16 +58,19 @@ def generate_launch_description():
           'approx_sync': True,              # Essential for sim sensors
         #   'use_sim_time': True,             # Essential for sim clock
           'wait_imu_to_init': True,
-          'odom_frame_id': 'odom',
+          'odom_frame_id': 'world_enu',  # Match your localisation_node
+        #   'odom_frame_id': 'odom',  # Match your localisation_node
+
           'Reg/Force3DoF': 'true',         # Constrain to 2D plane
           'Reg/Strategy': '1',              # Use Visual (0) not ICP (1) for fake lasers
+          'enable_sync': True
         #   'odometry_node_name': '/turtlebot/diff_drive_odometry',
     }]
 
     # Topic mapping for Stonefish
     remappings=[
-          ('imu', '/turtlebot/sensors/imu/filtered'),
-        # ('imu', '/turtlebot/imu'),
+        #   ('imu', '/turtlebot/sensors/imu/filtered'),
+        ('imu', '/turtlebot/imu'),
         #   ('rgb/image', '/turtlebot/camera/color/image_color'),
           ('rgb/image', '/turtlebot/camera/color/image_cropped'),
         #   ('rgb/camera_info', '/turtlebot/camera/color/camera_info'),
@@ -63,7 +81,7 @@ def generate_launch_description():
         ('depth/camera_info', '/turtlebot/camera/depth/camera_info_cropped'),
 
           ('scan', '/turtlebot/fake_scan'),
-          ('/rtabmap/base_controller/odom', '/turtlebot/odom'),
+          ('rtabmap/base_controller/odom', '/turtlebot/odom'),
           ] # The output from depth_to_laserscan
 
     return LaunchDescription([
@@ -109,7 +127,7 @@ def generate_launch_description():
                         ('depth_camera_info', '/turtlebot/camera/depth/camera_info_cropped'),
                         ('scan', '/turtlebot/fake_scan'),
                         ],
-            parameters=[{'range_max': 10.0, 'output_frame': 'camera_link', 'range_min': 0.28}]
+            parameters=[{'range_max': 2.0, 'output_frame': 'camera_link', 'range_min': 0.28}]
         ),
 
         Node(
@@ -118,19 +136,56 @@ def generate_launch_description():
             name='image_crop_node',
             parameters=[{'crop_bottom_fraction': 0.49}],
         ),
+
+        # Robot state publisher - visualize robot in RViz
+        # Node(
+        #     package='robot_state_publisher',
+        #     executable='robot_state_publisher',
+        #     name='robot_state_publisher',
+        #     output='screen',
+        #     parameters=[robot_description, {'use_sim_time': False}]
+        # ),
+
+        # Joint state publisher - publish dummy joint states for visualization
+        # Node(
+        #     package='joint_state_publisher',
+        #     executable='joint_state_publisher',
+        #     name='joint_state_publisher',
+        #     output='screen',
+        #     parameters=[{'use_sim_time': False}],
+        # ),
+
         # Node(
         #     package='rtabmap_odom', executable='rgbd_odometry', output='screen',
         #     parameters=parameters,
         #     arguments=[LaunchConfiguration    ("args"), LaunchConfiguration("odom_args")],
         #     remappings=remappings),
+        
         Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='camera_link_to_realsense_color',
-            # arguments: x y z yaw pitch roll parent_frame child_frame
-            # parameters=[{'use_sim_time': True}], # FORCE IT HERE
-            arguments=['0', '0', '0', '-1.5708', '0', '-1.5708', 'camera_link', 'turtlebot/realsense_color']
-        ),
+            package='rtabmap_sync', executable='rgbd_sync', output='screen',
+            parameters=[{'approx_sync_max_interval': 0.02,
+                         'sync_queue_size': 1000,
+                        'topic_queue_size': 1000,
+                        'queue_size': 1000}
+                        ],
+            remappings=remappings),
+        
+        
+        # Node(
+        #     package='tf2_ros',
+        #     executable='static_transform_publisher',
+        #     name='camera_link_to_realsense_color',
+        #     # arguments: x y z yaw pitch roll parent_frame child_frame
+        #     # parameters=[{'use_sim_time': True}], # FORCE IT HERE
+        #     arguments=['0', '0', '0', '-1.5708', '0', '-1.5708', 'camera_link', 'turtlebot/realsense_color']
+        # ),
+
+        # Node(
+        #     package='tf2_ros',
+        #     executable='static_transform_publisher',
+        #     name='odom_to_base_link',
+        #     arguments=['0', '0', '0', '0', '0', '0', 'odom', 'turtlebot/base_foor']
+        # ),
 
         Node(
             package='rtabmap_slam', executable='rtabmap', output='screen',
@@ -161,7 +216,7 @@ def generate_launch_description():
                 # RTAB-Map Specific Tuning
                 'Grid/Sensor': '0',                      # 0=LaserScan, 1=Depth Cloud. Set to 0 for fake laser.
                 # 2. Define the clearing distance
-                'Grid/RangeMax': '10.0',           # : Clear space up to 10 meters even if nothing is hit
+                'Grid/RangeMax': '2.0',           # : Clear space up to 10 meters even if nothing is hit
                 'Grid/RangeMin': '0.28',            # Optional: Ignore very close readings that may be noisy
                 'Grid/RayTracing': 'true',        # Ensure ray tracing is enabled (usually default)
                 'Grid/Scan2dUnknownSpaceFilled': 'true',  # CRITICAL: Clears space even if scan is empty
@@ -172,7 +227,7 @@ def generate_launch_description():
                 'RGBD/AngularUpdate': '0.01',          # Update map for small rotations
                 'RGBD/LinearUpdate': '0.01',           # Update map for small movements
                 'RGBD/OptimizeFromGraphEnd': 'false',  # Standard SLAM optimization
-                # 'Vis/MinInliers': '10',                # Minimum features for a valid transformation
+                # 'Vis/MinInliers': '10',                # Minimum features for a valid transformat ion
                 'Vis/MinInliers': '20',          # was 10 — require more feature matches before accepting
                 'Vis/InlierDistance': '0.05',    # tighter inlier threshold
                 'Mem/RehearsalSimilarity': '0.45', # was default 0.2 — harder to trigger loop closure
@@ -194,21 +249,21 @@ def generate_launch_description():
         #     parameters=parameters,
         #     remappings=remappings),
 
-        # Compute quaternion of the IMU
-        Node(
-            package='imu_filter_madgwick', executable='imu_filter_madgwick_node', output='screen',
-            parameters=[{'use_mag': False, 
-                         'world_frame':'enu', 
-                         'fixed_frame': 'world_enu', # FIXED: Aligns with your NED frame
-                        #  'fixed_frame': 'odom', 
-                         'publish_tf':False,
-                         'publish_debug_topics': True,
-                         'gain': 0.01
-                         },
-                         ],
-            # remappings=[('imu/data_raw', '/camera/imu')]),
-            remappings=[
-                        ('imu/data_raw', '/turtlebot/sensors/imu_enu'),
-                        # ('imu/data_raw', '/turtlebot/imu'),
-                        ('imu/data', '/turtlebot/imu/filtered')]),
+        # # Compute quaternion of the IMU
+        # Node(
+        #     package='imu_filter_madgwick', executable='imu_filter_madgwick_node', output='screen',
+        #     parameters=[{'use_mag': False, 
+        #                  'world_frame':'enu', 
+        #                 #  'fixed_frame': 'world_enu', # FIXED: Aligns with your NED frame
+        #                  'fixed_frame': 'odom', 
+        #                  'publish_tf':False,
+        #                  'publish_debug_topics': True,
+        #                  'gain': 0.01
+        #                  },
+        #                  ],
+        #     # remappings=[('imu/data_raw', '/camera/imu')]),
+        #     remappings=[
+        #                 ('imu/data_raw', '/turtlebot/sensors/imu_enu'),
+        #                 # ('imu/data_raw', '/turtlebot/imu_raw'),
+        #                 ('imu/data', '/turtlebot/imu/filtered')]),
     ])

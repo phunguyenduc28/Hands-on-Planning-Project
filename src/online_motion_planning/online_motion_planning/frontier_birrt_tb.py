@@ -55,12 +55,26 @@ class SamplingTurtlebot(Node):
         self.karea = 2
         self.find_frontier = True  # gate flag: True → frontier_viewpoint runs its search
 
-        # NEW in frontier_birrt_tb.py — not present in frontier_rrt_tb.py:
-        # Controls whether the search window is anchored to the robot's START position
-        # (global, never moves) or its CURRENT position (local, moves with the robot).
-        #   True  → global: window centred on start_world_pos, grows as area is explored
-        #   False → local:  window centred on the robot's live position each tick
-        self.use_global_search_window = False
+        # ── Search window mode ────────────────────────────────────────────────
+        # use_global_search_window = False (default):
+        #   Local window only — centred on the robot's current position, radius
+        #   grows on failure.  Visualised as a WHITE rectangle in RViz.
+        #
+        # use_global_search_window = True:
+        #   Global window only — a FIXED rectangle defined in the world_enu frame
+        #   by the four bounds below.  The window NEVER grows; it is purely a
+        #   spatial filter on which frontier centroids are eligible.
+        #   Sign convention (world_enu):
+        #     positive X = east, negative X = west
+        #     positive Y = north, negative Y = south
+        #   Visualised as a CYAN rectangle in RViz on /frontier_viz/global_search_area.
+        #   The local window (white rectangle) is still published alongside it so
+        #   you can see the robot's current detection scan area.
+        self.use_global_search_window = True
+        self.global_x_min = -3.5   # metres — western  boundary
+        self.global_x_max =  3.0   # metres — eastern  boundary
+        self.global_y_min = -5.0   # metres — southern boundary
+        self.global_y_max =  1.0   # metres — northern boundary
 
         # NEW — minimum robot-to-frontier distance filter (metres).
         # Any frontier centroid closer than this is silently rejected so the robot
@@ -567,6 +581,38 @@ class SamplingTurtlebot(Node):
 
         self.search_area_pub.publish(m)
 
+    def _publish_search_area_world(self, x_min, x_max, y_min, y_max):
+        """White rectangle drawn directly in world-enu metres — no RTAB cell conversion.
+
+        Used for the global search window so the rectangle always shows the full
+        intended box regardless of the current RTAB-Map extent.  If the bounds were
+        derived from RTAB cells they would be clipped to the map edge and appear to
+        grow as the map expands to cover the full global rectangle.
+        """
+        now = self.get_clock().now().to_msg()
+        m = Marker()
+        m.header.frame_id = self.binary_map_frame
+        m.header.stamp = now
+        m.ns = "search_area"
+        m.id = 0
+        m.type = Marker.LINE_STRIP
+        m.action = Marker.ADD
+        m.scale.x = 0.06
+        m.color.r = 1.0
+        m.color.g = 1.0
+        m.color.b = 1.0
+        m.color.a = 0.9
+        m.pose.orientation.w = 1.0
+        m.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
+        for cx, cy in [(x_min, y_min), (x_max, y_min),
+                       (x_max, y_max), (x_min, y_max), (x_min, y_min)]:
+            p = Point()
+            p.x = float(cx)
+            p.y = float(cy)
+            p.z = 0.05
+            m.points.append(p)
+        self.search_area_pub.publish(m)
+
     # ── BiRRT* tree visualisation ─────────────────────────────────────────────
     # CHANGED from frontier_rrt_tb.py:
     # Original _make_rrt_viz_callback(publish_every=50) had one shared publisher
@@ -719,13 +765,61 @@ class SamplingTurtlebot(Node):
         reachable = self.get_reachable_cells(nav_col, nav_row, max_cells=10000)
         self._publish_bfs_cells(reachable)
 
-        # Search window in RTAB-Map cell space — clipped to map boundaries
+        # Local window bounds (anchor ± radius) — always computed
         rtab_row_min = max(1,                    anchor_rtab_row - SEARCH_RADIUS)
         rtab_row_max = min(self.rtab_height - 1, anchor_rtab_row + SEARCH_RADIUS)
         rtab_col_min = max(1,                    anchor_rtab_col - SEARCH_RADIUS)
         rtab_col_max = min(self.rtab_width  - 1, anchor_rtab_col + SEARCH_RADIUS)
 
-        self._publish_search_area(rtab_row_min, rtab_row_max, rtab_col_min, rtab_col_max)
+        # Global mode override: replace the anchor+radius bounds with the fixed
+        # world_enu rectangle projected into RTAB cells this tick.
+        # The RTAB origin shifts as the map grows, so we re-project each tick.
+        # Sign convention: positive X = east, negative X = west;
+        #                  positive Y = north, negative Y = south.
+        if self.use_global_search_window:
+            rtab_col_min = max(1,
+                int((self.global_x_min - self.rtab_origin[0]) / self.rtab_resolution))
+            rtab_col_max = min(self.rtab_width  - 1,
+                int((self.global_x_max - self.rtab_origin[0]) / self.rtab_resolution))
+            rtab_row_min = max(1,
+                int((self.global_y_min - self.rtab_origin[1]) / self.rtab_resolution))
+            rtab_row_max = min(self.rtab_height - 1,
+                int((self.global_y_max - self.rtab_origin[1]) / self.rtab_resolution))
+
+        if self.use_global_search_window:
+            # Draw directly from world coords — never clipped to the RTAB map edge
+            self._publish_search_area_world(
+                self.global_x_min, self.global_x_max,
+                self.global_y_min, self.global_y_max
+            )
+            # Log effective RTAB cell bounds actually used for detection
+            # (may be narrower than the world bounds if the map hasn't grown to cover them)
+            eff_x_min = rtab_col_min * self.rtab_resolution + self.rtab_origin[0]
+            eff_x_max = rtab_col_max * self.rtab_resolution + self.rtab_origin[0]
+            eff_y_min = rtab_row_min * self.rtab_resolution + self.rtab_origin[1]
+            eff_y_max = rtab_row_max * self.rtab_resolution + self.rtab_origin[1]
+            self.get_logger().info(
+                f"[SEARCH] GLOBAL window — "
+                f"defined: x=[{self.global_x_min:.1f},{self.global_x_max:.1f}] "
+                f"y=[{self.global_y_min:.1f},{self.global_y_max:.1f}] | "
+                f"effective (clipped to RTAB map): x=[{eff_x_min:.1f},{eff_x_max:.1f}] "
+                f"y=[{eff_y_min:.1f},{eff_y_max:.1f}]",
+                throttle_duration_sec=5.0
+            )
+        else:
+            self._publish_search_area(rtab_row_min, rtab_row_max, rtab_col_min, rtab_col_max)
+            # Derive world bounds from RTAB cells so logging is in metres
+            eff_x_min = rtab_col_min * self.rtab_resolution + self.rtab_origin[0]
+            eff_x_max = rtab_col_max * self.rtab_resolution + self.rtab_origin[0]
+            eff_y_min = rtab_row_min * self.rtab_resolution + self.rtab_origin[1]
+            eff_y_max = rtab_row_max * self.rtab_resolution + self.rtab_origin[1]
+            self.get_logger().info(
+                f"[SEARCH] LOCAL window — "
+                f"radius={self.local_search_radius} cells | "
+                f"bounds: x=[{eff_x_min:.1f},{eff_x_max:.1f}] "
+                f"y=[{eff_y_min:.1f},{eff_y_max:.1f}]",
+                throttle_duration_sec=5.0
+            )
 
         # ── Frontier detection on the raw RTAB-Map (no inflation) ─────────────
         # Values: 0=free, 50=unknown (after normalisation), 100=occupied
@@ -828,6 +922,34 @@ class SamplingTurtlebot(Node):
             best_index = np.argmin(cost_list)
 
             if cost_list[best_index] == np.inf:
+                if self.use_global_search_window:
+                    self.max_radius_wait_count += 1
+                    self.get_logger().warn(
+                        f"[GLOBAL SEARCH] No reachable frontier inside window "
+                        f"x=[{self.global_x_min:.1f},{self.global_x_max:.1f}] "
+                        f"y=[{self.global_y_min:.1f},{self.global_y_max:.1f}] — "
+                        f"wait count: {self.max_radius_wait_count}/10"
+                    )
+                    if self.max_radius_wait_count >= 10:
+                        self.find_frontier = False
+                        if self.waypoints is not None and len(self.waypoints) > 0:
+                            self.get_logger().info(
+                                "Global window exhausted 10 times — following last path "
+                                f"({len(self.waypoints)} waypoints), then spinning 360°."
+                            )
+                            self.following_last_path = True
+                        else:
+                            self.get_logger().info(
+                                "Global window exhausted 10 times — no saved path, "
+                                "spinning 360° in place."
+                            )
+                            self.rotation_state = 'spinning_360'
+                            self.prev_yaw_for_spin = None
+                            self.spin_accumulated = 0.0
+                        return
+                    self.find_frontier = True
+                    return
+                prev_radius = self.local_search_radius
                 self.local_search_radius = min(
                     self.local_search_radius + 10,
                     self.max_local_search_radius
@@ -835,8 +957,8 @@ class SamplingTurtlebot(Node):
                 if self.local_search_radius >= self.max_local_search_radius:
                     self.max_radius_wait_count += 1
                     self.get_logger().warn(
-                        f"No reachable frontier within radius {self.local_search_radius}, "
-                        f"already at max ({self.max_local_search_radius}). "
+                        f"[LOCAL SEARCH] No reachable frontier — radius already at max "
+                        f"({self.max_local_search_radius} cells). "
                         f"Wait count: {self.max_radius_wait_count}/10"
                     )
                     if self.max_radius_wait_count >= 10:
@@ -855,8 +977,9 @@ class SamplingTurtlebot(Node):
                         return
                 else:
                     self.get_logger().warn(
-                        f"No reachable frontier within radius {self.local_search_radius}, "
-                        f"expanding to {self.local_search_radius}"
+                        f"[LOCAL SEARCH] No reachable frontier — radius GREW: "
+                        f"{prev_radius} → {self.local_search_radius} cells "
+                        f"(max={self.max_local_search_radius})"
                     )
                 self.find_frontier = True
                 return
@@ -877,7 +1000,35 @@ class SamplingTurtlebot(Node):
             # but not yet reached.  If RRT* fails, the radius stays grown so the
             # next search starts from a larger window instead of oscillating 20↔30.
         elif numLabels == 1:
+            if self.use_global_search_window:
+                self.max_radius_wait_count += 1
+                self.get_logger().warn(
+                    f"[GLOBAL SEARCH] No frontier cells inside window "
+                    f"x=[{self.global_x_min:.1f},{self.global_x_max:.1f}] "
+                    f"y=[{self.global_y_min:.1f},{self.global_y_max:.1f}] — "
+                    f"wait count: {self.max_radius_wait_count}/10"
+                )
+                if self.max_radius_wait_count >= 10:
+                    self.find_frontier = False
+                    if self.waypoints is not None and len(self.waypoints) > 0:
+                        self.get_logger().info(
+                            "Global window exhausted 10 times — following last path "
+                            f"({len(self.waypoints)} waypoints), then spinning 360°."
+                        )
+                        self.following_last_path = True
+                    else:
+                        self.get_logger().info(
+                            "Global window exhausted 10 times — no saved path, "
+                            "spinning 360° in place."
+                        )
+                        self.rotation_state = 'spinning_360'
+                        self.prev_yaw_for_spin = None
+                        self.spin_accumulated = 0.0
+                    return
+                self.find_frontier = True
+                return
             # No frontier cells in local window — window too small, not fully explored
+            prev_radius = self.local_search_radius
             self.local_search_radius = min(
                 self.local_search_radius + 10,
                 self.max_local_search_radius
@@ -885,7 +1036,8 @@ class SamplingTurtlebot(Node):
             if self.local_search_radius >= self.max_local_search_radius:
                 self.max_radius_wait_count += 1
                 self.get_logger().info(
-                    f"No frontier cells at max search radius — exploration complete. "
+                    f"[LOCAL SEARCH] No frontier cells — radius already at max "
+                    f"({self.max_local_search_radius} cells). "
                     f"Wait count: {self.max_radius_wait_count}/10"
                 )
                 if self.max_radius_wait_count >= 10:
@@ -904,8 +1056,9 @@ class SamplingTurtlebot(Node):
                     return
             else:
                 self.get_logger().warn(
-                    f"No frontier cells in local window (radius {self.local_search_radius}), "
-                    f"expanding to {self.local_search_radius}"
+                    f"[LOCAL SEARCH] No frontier cells — radius GREW: "
+                    f"{prev_radius} → {self.local_search_radius} cells "
+                    f"(max={self.max_local_search_radius})"
                 )
             self.find_frontier = True
             return
@@ -1280,9 +1433,16 @@ class SamplingTurtlebot(Node):
             if self.prev_yaw_for_spin is None:
                 self.prev_yaw_for_spin = self.current_yaw
                 self.spin_accumulated = 0.0
-            delta = abs(self.normalize_angle(self.current_yaw - self.prev_yaw_for_spin))
-            self.spin_accumulated += delta
-            self.prev_yaw_for_spin = self.current_yaw
+            else:
+                # OLD: delta = abs(self.normalize_angle(self.current_yaw - self.prev_yaw_for_spin))
+                # NEW: Handle angle wrap-around explicitly (more robust at ±π boundary)
+                delta = self.current_yaw - self.prev_yaw_for_spin
+                if delta > math.pi:
+                    delta -= 2 * math.pi
+                elif delta < -math.pi:
+                    delta += 2 * math.pi
+                self.spin_accumulated += abs(delta)
+                self.prev_yaw_for_spin = self.current_yaw
             if self.spin_accumulated >= 2 * math.pi - 0.1:
                 self.cmd_vel_pub.publish(Twist())
                 self.rotation_state = 'halted'
@@ -1335,9 +1495,16 @@ class SamplingTurtlebot(Node):
             if self.prev_yaw_for_spin is None:
                 self.prev_yaw_for_spin = self.current_yaw
                 self.spin_accumulated = 0.0
-            delta = abs(self.normalize_angle(self.current_yaw - self.prev_yaw_for_spin))
-            self.spin_accumulated += delta
-            self.prev_yaw_for_spin = self.current_yaw
+            else:
+                # OLD: delta = abs(self.normalize_angle(self.current_yaw - self.prev_yaw_for_spin))
+                # NEW: Handle angle wrap-around explicitly (more robust at ±π boundary)
+                delta = self.current_yaw - self.prev_yaw_for_spin
+                if delta > math.pi:
+                    delta -= 2 * math.pi
+                elif delta < -math.pi:
+                    delta += 2 * math.pi
+                self.spin_accumulated += abs(delta)
+                self.prev_yaw_for_spin = self.current_yaw
             if self.spin_accumulated >= 2 * math.pi - 0.1:
                 self.cmd_vel_pub.publish(Twist())
                 self.rotation_state = 'moving'

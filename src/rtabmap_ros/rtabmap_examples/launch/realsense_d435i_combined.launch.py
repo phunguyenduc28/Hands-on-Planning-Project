@@ -83,6 +83,8 @@ def generate_launch_description():
         #     parameters=[vo_parameters],
         #     arguments=[LaunchConfiguration("args"), LaunchConfiguration("odom_args")],
         #     remappings=vo_remappings),
+        
+        
 
         Node(
             package='rtabmap_slam', executable='rtabmap', output='screen',
