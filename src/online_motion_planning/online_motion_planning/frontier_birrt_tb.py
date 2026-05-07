@@ -14,7 +14,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 # CHANGED from frontier_rrt_tb.py:
 # from online_motion_planning.rrt_star import RRT_STAR
-# → Uses the new BiRRT* planner that grows two trees simultaneously (start + goal).
+# -> Uses the new BiRRT* planner that grows two trees simultaneously (start + goal).
 #   Everything else in this file is identical to frontier_rrt_tb.py EXCEPT the
 #   sections annotated below.
 from online_motion_planning.bidirectional_rrt_star import BIRRT_STAR
@@ -25,8 +25,6 @@ import copy
 
 class SamplingTurtlebot(Node):
     def __init__(self):
-        # CHANGED from frontier_rrt_tb.py: was 'sampling_turtlebot'.
-        # Renamed so both nodes can run simultaneously without a name clash.
         super().__init__('sampling_turtlebot_birrt')
         self.robot_pose = None
         self.goal_pose = None
@@ -45,45 +43,41 @@ class SamplingTurtlebot(Node):
         self.height = None
         self.width = None
 
-        # ── Frontier variables ────────────────────────────────────────────────
+        # Frontier variables
         # kdist / karea: weights for the frontier cost function.
-        #   cost = -kdist*dist - karea*area  (lower = better)
-        #   CHANGED from frontier_rrt_tb.py: cost was +kdist*dist (closer = better).
-        #   Now negated so FARTHER, LARGER frontiers are preferred, preventing the
-        #   robot from endlessly re-selecting the boundary it is already sitting on.
         self.kdist = 1
         self.karea = 2
-        self.find_frontier = True  # gate flag: True → frontier_viewpoint runs its search
+        self.find_frontier = True  # gate flag: True -> frontier_viewpoint runs its search
 
-        # ── Search window mode ────────────────────────────────────────────────
+        # Search window mode 
         # use_global_search_window = False (default):
         #   Local window only — centred on the robot's current position, radius
         #   grows on failure.  Visualised as a WHITE rectangle in RViz.
         #
         # use_global_search_window = True:
         #   Global window only — a FIXED rectangle defined in the world_enu frame
-        #   by the four bounds below.  The window NEVER grows; it is purely a
+        #   by the four bounds below.  The window never grows; it is purely a
         #   spatial filter on which frontier centroids are eligible.
         #   Sign convention (world_enu):
         #     positive X = east, negative X = west
         #     positive Y = north, negative Y = south
-        #   Visualised as a CYAN rectangle in RViz on /frontier_viz/global_search_area.
-        #   The local window (white rectangle) is still published alongside it so
-        #   you can see the robot's current detection scan area.
+        #   Visualised as a white rectangle in RViz on /frontier_viz/global_search_area.
         self.use_global_search_window = True
         self.global_x_min = -3.5   # metres — western  boundary
         self.global_x_max =  3.0   # metres — eastern  boundary
         self.global_y_min = -5.0   # metres — southern boundary
         self.global_y_max =  1.0   # metres — northern boundary
+        self.global_search_count_threshold = 10  # tune: how many ticks at max radius trigger the terminal behaviour
 
-        # NEW — minimum robot-to-frontier distance filter (metres).
-        # Any frontier centroid closer than this is silently rejected so the robot
+
+        # minimum robot-to-frontier distance filter (metres).
+        # Any frontier centroid closer than this from the robot is silently rejected so the robot
         # never re-selects the boundary it is already touching.
         # Tune up if the robot keeps circling the same boundary;
         # tune down if valid corridor frontiers are being skipped.
         self.min_frontier_dist_m = 0.5
 
-        # NEW — visited-frontier blacklist.
+        # visited-frontier blacklist.
         # visited_frontier_positions: list of world (x,y) tuples, one per successfully
         #   navigated frontier goal; populated in control_loop when all waypoints are reached.
         # visited_frontier_radius_m:  any future frontier centroid within this radius of
@@ -92,7 +86,7 @@ class SamplingTurtlebot(Node):
         self.visited_frontier_positions = []
         self.visited_frontier_radius_m  = 0.5
 
-        # NEW — count-based search-window expansion.
+        # count-based search-window expansion.
         # frontiers_explored_count: incremented each time a frontier is successfully reached.
         # frontier_expand_every:    after every N reached frontiers the search window grows
         #                           proactively (in addition to the failure-based expansion).
@@ -101,7 +95,7 @@ class SamplingTurtlebot(Node):
         self.frontier_expand_every    = 3    # tune: how many frontiers trigger an expansion
         self.frontier_expand_step     = 15   # tune: how many cells to add per expansion
 
-        # ── BiRRT* / planning variables ───────────────────────────────────────
+        # BiRRT* / planning variables 
         # CHANGED from frontier_rrt_tb.py: used RRT_STAR with max_iterations=2000, delta_q=8.
         # max_iterations_base: starting budget per planning attempt.
         # max_iterations_cap:  ceiling — never goes above this regardless of failures.
@@ -122,7 +116,9 @@ class SamplingTurtlebot(Node):
         self.min_dist = 5
         self.radius = 5
         self.threshold_path_rewire_dist = 5
-
+        self.max_retry_same_goal = 3
+        self.max_iterations_increment = 2000
+        
         self.waypoints = None
 
         self.collide_robot_next_waypoint = False
@@ -132,10 +128,10 @@ class SamplingTurtlebot(Node):
         self.declare_parameter('map_frame', 'world_enu')
         self.binary_map_frame = self.get_parameter('map_frame').value
 
-        # NEW — dual-map design (not in frontier_rrt_tb.py):
+        # dual-map design:
         # Raw RTAB-Map (/map) is used only for frontier cell detection because it has
         # sharp free/unknown boundaries.  Navigation (BFS, RRT*) uses the inflated map.
-        # Standard ROS values: 0=free, 100=occupied, -1=unknown (→ 50 after normalisation)
+        # Standard ROS values: 0=free, 100=occupied, -1=unknown (-> 50 after normalisation)
         self.rtab_map        = None
         self.rtab_origin     = None
         self.rtab_resolution = None
@@ -143,22 +139,20 @@ class SamplingTurtlebot(Node):
         self.rtab_height     = None
 
         # Subscribers
-        # CHANGED: added rtab_map_sub for the raw /map topic (dual-map design)
+        # added rtab_map_sub for the raw /map topic (dual-map design)
         self.odom_sub = self.create_subscription(Odometry, '/turtlebot/odom', self.odom_callback, 10)
         self.binary_map_sub = self.create_subscription(OccupancyGrid, '/inflated_map', self.map_callback, 10)
         self.rtab_map_sub   = self.create_subscription(OccupancyGrid, '/map', self._rtab_map_callback, 10)
 
         # Publishers
-        # CHANGED from frontier_rrt_tb.py: had only marker_pub and cmd_vel_pub.
         # Added dedicated publishers for each visualisation layer so each can be
         # toggled independently in RViz:
         #   frontier_all_pub  — coloured POINTS markers for every detected frontier cluster
         #   bfs_cells_pub     — semi-transparent green overlay of all BFS-reachable cells
         #   frontier_eval_pub — cyan spheres for evaluated candidates, green for selected
-        #   search_area_pub   — white rectangle showing the current search window bounds
+        #   search_area_pub   —  rectangle (white in case of local, cyan in case of global) showing the current search window bounds
         #   rrt_tree_a_pub    — growing blue LINE_LIST for BiRRT* forward tree (from start)
         #   rrt_tree_b_pub    — growing orange LINE_LIST for BiRRT* backward tree (from goal)
-        # CHANGED: single rrt_tree_pub → two separate publishers to avoid z-fighting /
         #   depth-buffer overwriting when both trees publish to the same topic.
         self.marker_pub = self.create_publisher(MarkerArray, '/visualization_marker_array', 10)
         self.frontier_all_pub = self.create_publisher(MarkerArray, '/frontier_viz/all_frontiers', 10)
@@ -174,17 +168,16 @@ class SamplingTurtlebot(Node):
         self.path_timer = self.create_timer(1, self.path_planning_loop)       # 1 Hz
         self.viewpoint_timer = self.create_timer(2, self.frontier_viewpoint)  # 0.5 Hz
 
-        # CHANGED from frontier_rrt_tb.py: rotation_state was 'idle'/'rotating_left'/
         # 'rotating_right'/'rotating_back'/'moving'.  Simplified to a 360° scan
         # (scanning_360) at each new waypoint location instead of the 3-phase sweep.
-        # spinning_360 → terminal exploration-complete spin → halted.
+        # spinning_360 -> terminal exploration-complete spin -> halted.
         self.rotation_state = 'idle'   # 'idle', 'scanning_360', 'moving', 'spinning_360', 'halted'
         self.rotation_target_yaw = None
         self.rotation_start_yaw = None
         self.rotation_tolerance = 0.05   # radians
 
         # local_search_radius: current half-width of the search window in RTAB-Map cells.
-        #   Grows by 10 cells each tick no valid frontier is found (failure-based),
+        #   Grows by 10 cells each tick when no valid frontier is found (failure-based),
         #   and by frontier_expand_step every frontier_expand_every reached frontiers
         #   (count-based).  Never resets after a successful frontier navigation so the
         #   window monotonically expands as the robot explores further from start.
@@ -192,35 +185,40 @@ class SamplingTurtlebot(Node):
         #   triggers the terminal "follow last path then spin" behaviour.
         self.local_search_radius = 20
         self.max_local_search_radius = 50
+        self.local_search_count_threshold = 10  # tune: how many ticks at max radius trigger the terminal behaviour
+        
+        
         self.max_radius_wait_count = 0   # consecutive ticks at max radius before terminal condition
+        
 
         # prev_yaw_for_spin / spin_accumulated: shared state for the 360° spin logic
         # used by both scanning_360 (waypoint scan) and spinning_360 (terminal spin).
         self.prev_yaw_for_spin = None
         self.spin_accumulated = 0.0
 
-        # NEW — terminal exploration behaviour (not in frontier_rrt_tb.py):
-        # When no frontiers are found after 10 attempts at max radius, instead of
+        # terminal exploration behaviour
+        # When no frontiers are found after 10 attempts at max radius (in case of global search
+        # window, its at given radius), instead of
         # spinning immediately the robot follows its last saved path as far as the
         # path remains clear, then executes the terminal 360° spin at that point.
         # This gives sensors one final sweep at the exploration boundary.
         self.following_last_path = False
 
-        # NEW — global search window anchor (not in frontier_rrt_tb.py):
+        # global search window anchor:
         # Latched from the very first odom message; never updated.
         # When use_global_search_window=True this world (x,y) is the fixed centre
         # of the search window regardless of where the robot currently is.
         self.start_world_pos = None
 
-        # NEW — scan-suppression state (not in frontier_rrt_tb.py):
+        # scan-suppression state:
         # last_scan_pos: world (x,y) where the last 360° waypoint scan was performed.
         # scan_distance_threshold: robot must move at least this far (metres) from
-        #   last_scan_pos before a new scan is triggered at the next waypoint.
+        #   last_scan_pos before a new 360° scan is triggered at the next waypoint.
         #   This prevents a replan at the same location from causing a redundant scan.
         self.last_scan_pos = None
         self.scan_distance_threshold = 0.4
 
-        # ── Arm retraction ───────────────────────────────────────────────────
+        # Arm retraction 
         # From FK:  r = 0.0698 - L2*sin(q2) + L3*cos(q3)
         # Minimum r (≈84 mm) at q2=+0.040, q3=-1.45  →  within turtlebot footprint.
         self.arm_q2 = None          # set by joint-state callback
@@ -239,7 +237,7 @@ class SamplingTurtlebot(Node):
 
     def odom_callback(self, msg):
         self.robot_pose = msg.pose.pose.position
-        # NEW vs frontier_rrt_tb.py: latch the very first pose as the global search
+        # latch the very first pose as the global search
         # window anchor.  Fires exactly once; subsequent messages only update robot_pose
         # and current_yaw as before.
         if self.start_world_pos is None:
@@ -254,19 +252,6 @@ class SamplingTurtlebot(Node):
         self.current_yaw = math.atan2(siny_cosp, cosy_cosp)
 
     def map_callback(self, msg):
-        # info = msg.info
-
-        # self.resolution = info.resolution
-
-        # self.width = info.width
-        # self.height = info.height 
-        
-        # origin_x = info.origin.position.x 
-        # origin_y = info.origin.position.y
-        # self.origin = np.array([origin_x, origin_y])
-
-        # self.occupancy_map = np.array(msg.data, dtype = float).reshape(self.height, self.width)
-
         info = msg.info
         self.resolution = info.resolution
         self.width = info.width
@@ -275,18 +260,36 @@ class SamplingTurtlebot(Node):
         origin_y = info.origin.position.y
         self.origin = np.array([origin_x, origin_y])
 
+        # ROS publishes the occupancy grid as a flat 1-D list; reshape into 2-D
+        # so every caller can index it as map[row, col].
         raw = np.array(msg.data, dtype=float).reshape(self.height, self.width)
 
-        # Normalize: -1 (unknown in ROS) → 50 so our code treats it uniformly
+        # Normalise unknown cells: ROS uses -1 for "not yet seen by sensor".
+        # Remap to 50 so it sits between free (0) and occupied (100) as a neutral sentinel.
         raw[raw == -1] = 50.0
 
+        # occupancy_map — full inflated gradient, values 0-100:
+        #   0        : free (well clear of obstacles)
+        #   1–98     : inflation zone (passable but increasingly close to a wall)
+        #   99       : inscribed radius (robot centre would touch wall)
+        #   100      : lethal (wall itself)
+        #   50       : unknown (not yet observed)
+        # Used by:
+        #   - BFS flood-fill (get_reachable_cells) with threshold < 100
+        #   - binary_map derivation below
         self.occupancy_map = raw
 
-        # Threshold >= 99: only block inscribed-radius (99) and lethal (100) cells.
-        # costmap_2d publishes a gradient 1–98 for the inflation zone around walls.
-        # Using > 50 treated the ENTIRE gradient as obstacles, leaving < 1% free
-        # space for RRT* to sample in and causing 99%+ rejection rates.
-        # >= 99 keeps the robot clear of wall footprints while giving RRT* room to plan.
+        # binary_map — hard 0/1 obstacle mask derived from occupancy_map:
+        #   0 : free  (occupancy_map value 0–98, including inflation gradient)
+        #   1 : blocked (occupancy_map value 99–100, wall footprint + lethal)
+        # Threshold >= 99: keeps the inflation gradient (1–98) as passable so
+        # RRT* has room to sample paths. Using > 50 would block the entire
+        # inflation zone, leaving < 1% free space and causing 99%+ rejection rates.
+        # Used by:
+        #   - RRT* / BiRRT* (is_point_occupied, is_segment_free_bisection)
+        #   - path collision checker in path_planning_loop
+        #   - following_last_path segment checker
+        #   - _find_nearest_free_cell (start snapping)
         self.binary_map = np.where(copy.deepcopy(self.occupancy_map) >= 99, 1, 0)
 
     def _rtab_map_callback(self, msg):
@@ -299,11 +302,10 @@ class SamplingTurtlebot(Node):
         self.rtab_origin     = np.array([info.origin.position.x, info.origin.position.y])
 
         raw = np.array(msg.data, dtype=float).reshape(self.rtab_height, self.rtab_width)
-        raw[raw == -1] = 50.0   # unknown → 50, same sentinel as inflated map
+        raw[raw == -1] = 50.0   # unknown -> 50, same as inflated map
         self.rtab_map = raw
 
     def frontier_cost(self, area, cX, cY):
-        # CHANGED from frontier_rrt_tb.py:
         # Original used row/col swapped: q_goal = [cY, cX], q_start = [robot.y, robot.x]
         # Fixed to x=col, y=row throughout to match Point convention and is_point_occupied.
         q_goal  = np.array([cX, cY])   # cX=col (x), cY=row (y) in inflated-map cells
@@ -311,15 +313,14 @@ class SamplingTurtlebot(Node):
         q_goal_point  = PointRRT(q_goal[0], q_goal[1])
         q_start_point = PointRRT(q_start[0], q_start[1])
         dist = q_start_point.dist(q_goal_point)   # Euclidean distance in map cells
-
-        # CHANGED from frontier_rrt_tb.py: was cost = +kdist*dist - karea*area
-        # (closer = lower cost = preferred).  Now negated so FARTHER, LARGER frontiers
+        #Now negated so farther, larger frontiers
         # are preferred.  This prevents the robot from endlessly re-selecting the
         # boundary it is sitting on.  The min_frontier_dist_m hard filter provides a
         # complementary hard cutoff below the preferred distance.
         cost = -self.kdist*dist - self.karea*area
         return cost
     
+    # Potential TODO: How to decide the value for max_cells to reduce the number of computations
     def get_reachable_cells(self, robot_col, robot_row, max_cells=10000):
         """BFS flood fill from the robot position through the inflated map.
         Walks through any cell with value < 99 (free + inflation gradient).
@@ -352,11 +353,10 @@ class SamplingTurtlebot(Node):
         return visited
 
     def _find_nearest_free_cell(self, col, row, max_radius=20):
-        """NEW method — not present in frontier_rrt_tb.py.
-
+        """
         BFS outward from (col, row) to find the closest cell where binary_map == 0.
         Used in path_planning_loop to snap the robot's start cell to the nearest free
-        cell when localisation drift places the robot inside an inflation zone (>= 99).
+        cell in case the robot is placed inside an inflation zone (>= 99).
 
         Without this, any momentary map spike that marks the robot's cell as occupied
         causes RRT* to abort immediately ('start is occupied') and planning fails every
@@ -389,7 +389,7 @@ class SamplingTurtlebot(Node):
                 queue.append((nc, nr))
         return None, None
 
-    # ── Visualisation helpers ─────────────────────────────────────────────────
+    # Visualisation helpers 
 
     _FRONTIER_COLORS = [
         (1.0, 1.0, 0.0),   # yellow
@@ -598,9 +598,9 @@ class SamplingTurtlebot(Node):
         m.type = Marker.LINE_STRIP
         m.action = Marker.ADD
         m.scale.x = 0.06
-        m.color.r = 1.0
+        m.color.r = 0.0
         m.color.g = 1.0
-        m.color.b = 1.0
+        m.color.b = 1.0   # cyan — distinguishes global window from the white local window
         m.color.a = 0.9
         m.pose.orientation.w = 1.0
         m.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
@@ -613,27 +613,7 @@ class SamplingTurtlebot(Node):
             m.points.append(p)
         self.search_area_pub.publish(m)
 
-    # ── BiRRT* tree visualisation ─────────────────────────────────────────────
-    # CHANGED from frontier_rrt_tb.py:
-    # Original _make_rrt_viz_callback(publish_every=50) had one shared publisher
-    # (rrt_tree_pub) and returned a single callback.  It used Marker.DELETEALL to
-    # clear the topic and published with marker_id=0.
-    #
-    # Problems that were fixed:
-    # 1. Both BiRRT* trees published to the same topic with different marker IDs → RViz
-    #    rendered them in publication order; the later one (orange) overwrote the earlier
-    #    one (blue) in the depth buffer at z=0.08, making blue invisible.
-    # 2. publish_every=50 meant that when T_a had a 99% rejection rate (only 33 nodes
-    #    added), its callback was called < 50 times and the marker was never published.
-    #
-    # Fixes applied:
-    # - Separate publishers (rrt_tree_a_pub / rrt_tree_b_pub) → completely independent
-    #   RViz topics, no depth-buffer interference.
-    # - Different z_height per tree (0.06 blue, 0.10 orange) as defence-in-depth.
-    # - publish_every=10 → more frequent intermediate publishes so sparse trees appear.
-    # - Returns (callback, flush): flush() is called after sample() returns to guarantee
-    #   the final accumulated state is always published even if count never hit threshold.
-
+    # BiRRT* tree visualisation 
     def _make_rrt_viz_callback(self, publisher,
                                publish_every=10,
                                color_rgb=(0.2, 0.6, 1.0),
@@ -702,8 +682,7 @@ class SamplingTurtlebot(Node):
 
         return callback, flush
 
-    # ── Frontier selection ────────────────────────────────────────────────────
-
+    # Frontier selection 
     def frontier_viewpoint(self):
         if self.rotation_state in ('spinning_360', 'halted'):
             return
@@ -712,36 +691,18 @@ class SamplingTurtlebot(Node):
         if self.occupancy_map is None or self.rtab_map is None or self.robot_pose is None or self.start_world_pos is None or self.find_frontier == False:
             return
 
-        # frontier_cells = np.zeros((self.height, self.width), dtype=np.uint8)
-
-        # for y in range(1, self.height - 1):
-        #     for x in range(1, self.width - 1):
-        #         if self.occupancy_map[y, x] == 0:  # Cell is Free
-        #             neighbors = [self.occupancy_map[y-1, x], self.occupancy_map[y+1, x],
-        #                         self.occupancy_map[y, x-1], self.occupancy_map[y, x+1]]
-        #             if 50.0 in neighbors:
-        #                 if 100.0 not in neighbors:
-        #                     frontier_cells[y, x] = 255
-
-        # output = cv2.connectedComponentsWithStats(frontier_cells, 8, cv2.CV_32S)
-        # (numLabels, labels, stats, centroids) = output
-
-        # cost_list = np.full(numLabels, np.inf) # Initialize with infinity
-
         # Guard: need both maps
         if self.rtab_map is None:
             self.get_logger().warn("Waiting for /map from RTAB-Map…", throttle_duration_sec=5.0)
             return
 
-        # ── Robot position in inflated-map coords (BFS / path planning) ─────────
-        # CHANGED from frontier_rrt_tb.py: original used only one map and one coord system.
+        # Robot position in inflated-map coords (BFS / path planning)
         # Here nav_col/nav_row are on the inflated map (for BFS and RRT*) while
         # rtab_* coords are on the raw RTAB-Map (for frontier cell detection).
         nav_col = int((self.robot_pose.x - self.origin[0]) / self.resolution)
         nav_row = int((self.robot_pose.y - self.origin[1]) / self.resolution)
 
-        # ── Search window centre ──────────────────────────────────────────────
-        # CHANGED from frontier_rrt_tb.py: original searched the entire map with no window.
+        # Search window centre 
         # Now uses a square window centred on either the start position (global) or the
         # robot's current position (local), controlled by use_global_search_window.
         # The anchor is projected into RTAB-Map cell space each tick so it stays correct
@@ -756,7 +717,7 @@ class SamplingTurtlebot(Node):
 
         SEARCH_RADIUS = self.local_search_radius   # grows on failure; never resets
 
-        # NEW — BFS reachability on the inflated map.
+        # BFS reachability on the inflated map.
         # Returns the set of (col, row) cells reachable from the robot through free/
         # semi-free space.  Any frontier centroid whose inflated-map cell is NOT in this
         # set is unreachable (e.g. on the other side of a wall) and is discarded before
@@ -772,8 +733,8 @@ class SamplingTurtlebot(Node):
         rtab_col_max = min(self.rtab_width  - 1, anchor_rtab_col + SEARCH_RADIUS)
 
         # Global mode override: replace the anchor+radius bounds with the fixed
-        # world_enu rectangle projected into RTAB cells this tick.
-        # The RTAB origin shifts as the map grows, so we re-project each tick.
+        # world_enu rectangle projected into RTAB cells.
+        # The RTAB origin may shift as the map grows, so we re-project each tick.
         # Sign convention: positive X = east, negative X = west;
         #                  positive Y = north, negative Y = south.
         if self.use_global_search_window:
@@ -821,7 +782,7 @@ class SamplingTurtlebot(Node):
                 throttle_duration_sec=5.0
             )
 
-        # ── Frontier detection on the raw RTAB-Map (no inflation) ─────────────
+        # Frontier detection on the raw RTAB-Map (no inflation) 
         # Values: 0=free, 50=unknown (after normalisation), 100=occupied
         frontier_cells = np.zeros((self.rtab_height, self.rtab_width), dtype=np.uint8)
 
@@ -835,9 +796,14 @@ class SamplingTurtlebot(Node):
                         self.rtab_map[y, x+1]
                     ]
                     if 50.0 in neighbors and 100.0 not in neighbors:
-                        frontier_cells[y, x] = 255
+                        frontier_cells[y, x] = 255 
+                        # If all three conditions pass, 
+                        # the cell is marked 255 in frontier_cells 
+                        # (a binary image where 255 = frontier pixel, 0 = not frontier).
 
         output = cv2.connectedComponentsWithStats(frontier_cells, 8, cv2.CV_32S)
+        # cv2.connectedComponentsWithStats groups adjacent 255 pixels into clusters 
+        # — each cluster is one contiguous unexplored boundary region whose centroid becomes a candidate goal.
         (numLabels, labels, stats, centroids) = output
 
         # Visualise using RTAB-Map resolution/origin
@@ -865,16 +831,23 @@ class SamplingTurtlebot(Node):
             cl_height = stats[i, cv2.CC_STAT_HEIGHT]
             if min(cl_width, cl_height) < 3:
                 continue
-
+            
+            # Filter 1 — centroid must be inside the search window
             if not (rtab_col_min <= int(cX) <= rtab_col_max and
                     rtab_row_min <= int(cY) <= rtab_row_max):
                 continue
-
+            
+            # Filter 2 — centroid must not be too close to the map edge
+            # the frontier detection loop only checks 4-connected neighbours (y-1, y+1, x-1, x+1).
+            # At the very edge of the map, some of those neighbours don't exist, 
+            # so frontier cells can appear there as artefacts — they look like they 
+            # border unknown space simply because the map ends, not because unexplored 
+            # space actually exists there. A 3-cell margin eliminates those false positives
             if not (EDGE_MARGIN <= int(cX) < self.rtab_width  - EDGE_MARGIN and
                     EDGE_MARGIN <= int(cY) < self.rtab_height - EDGE_MARGIN):
                 continue
 
-            # Convert RTAB-Map centroid → world → inflated-map cell for BFS check
+            # Convert RTAB-Map centroid -> world -> inflated-map cell for BFS check
             world_x = cX * self.rtab_resolution + self.rtab_origin[0]
             world_y = cY * self.rtab_resolution + self.rtab_origin[1]
             nav_cx  = int((world_x - self.origin[0]) / self.resolution)
@@ -882,11 +855,10 @@ class SamplingTurtlebot(Node):
 
             # BFS reachability check: convert RTAB centroid → world → inflated-map cell,
             # then test membership in the BFS-reachable set.
-            # CHANGED from frontier_rrt_tb.py: original had no reachability check.
             if (nav_cx, nav_cy) not in reachable:
                 continue
 
-            # NEW filter 1 — minimum robot-to-frontier distance (min_frontier_dist_m).
+            # filter 1 — minimum robot-to-frontier distance (min_frontier_dist_m).
             # Rejects any frontier whose centroid is within this world distance of the
             # robot's current position.  Prevents re-selecting the boundary the robot
             # is already touching, which would cause it to spin in place.
@@ -895,7 +867,7 @@ class SamplingTurtlebot(Node):
             if world_dist < self.min_frontier_dist_m:
                 continue
 
-            # NEW filter 2 — visited-frontier blacklist (visited_frontier_radius_m).
+            # filter 2 — visited-frontier blacklist (visited_frontier_radius_m).
             # Rejects any frontier within visited_frontier_radius_m metres of any
             # previously successfully navigated frontier goal.  Entries are added to
             # visited_frontier_positions in control_loop when all waypoints are reached.
@@ -906,6 +878,10 @@ class SamplingTurtlebot(Node):
                 continue
 
             capped_area = min(area, MAX_FRONTIER_AREA)
+            # Without a cap, a very large frontier cluster (say 5000 pixels) 
+            # would produce a massive negative cost that completely drowns out the distance term. 
+            # The robot would always chase the single biggest frontier regardless of how far away it is, 
+            # ignoring all others even if they are comparably large and much closer.
             cost = self.frontier_cost(capped_area, nav_cx, nav_cy)
             cost_list[i] = cost
 
@@ -919,6 +895,8 @@ class SamplingTurtlebot(Node):
         self._publish_frontier_evaluation(evaluated_centroids, current_best_world)
 
         if numLabels > 1:
+            # Frontier pixels were found and clustered, but every cluster 
+            # was rejected by the filters (BFS, distance, visited, edge margin)
             best_index = np.argmin(cost_list)
 
             if cost_list[best_index] == np.inf:
@@ -928,19 +906,19 @@ class SamplingTurtlebot(Node):
                         f"[GLOBAL SEARCH] No reachable frontier inside window "
                         f"x=[{self.global_x_min:.1f},{self.global_x_max:.1f}] "
                         f"y=[{self.global_y_min:.1f},{self.global_y_max:.1f}] — "
-                        f"wait count: {self.max_radius_wait_count}/10"
+                        f"wait count: {self.max_radius_wait_count}/{self.global_search_count_threshold}"
                     )
-                    if self.max_radius_wait_count >= 10:
+                    if self.max_radius_wait_count >= self.global_search_count_threshold:
                         self.find_frontier = False
                         if self.waypoints is not None and len(self.waypoints) > 0:
                             self.get_logger().info(
-                                "Global window exhausted 10 times — following last path "
+                                f"Global window exhausted {self.global_search_count_threshold} times — following last path "
                                 f"({len(self.waypoints)} waypoints), then spinning 360°."
                             )
                             self.following_last_path = True
                         else:
                             self.get_logger().info(
-                                "Global window exhausted 10 times — no saved path, "
+                                f"Global window exhausted {self.global_search_count_threshold} times — no saved path, "
                                 "spinning 360° in place."
                             )
                             self.rotation_state = 'spinning_360'
@@ -959,18 +937,18 @@ class SamplingTurtlebot(Node):
                     self.get_logger().warn(
                         f"[LOCAL SEARCH] No reachable frontier — radius already at max "
                         f"({self.max_local_search_radius} cells). "
-                        f"Wait count: {self.max_radius_wait_count}/10"
+                        f"Wait count: {self.max_radius_wait_count}/{self.local_search_count_threshold}"
                     )
-                    if self.max_radius_wait_count >= 10:
+                    if self.max_radius_wait_count >= self.local_search_count_threshold:
                         self.find_frontier = False
                         if self.waypoints is not None and len(self.waypoints) > 0:
                             self.get_logger().info(
-                                "Max radius reached 10 times — following last path to farthest "
+                                f"Max radius reached {self.local_search_count_threshold} times — following last path to farthest "
                                 f"clear point ({len(self.waypoints)} waypoints), then spinning 360°."
                             )
                             self.following_last_path = True
                         else:
-                            self.get_logger().info("Max radius reached 10 times — no saved path, spinning 360° in place.")
+                            self.get_logger().info(f"Max radius reached {self.local_search_count_threshold} times — no saved path, spinning 360° in place.")
                             self.rotation_state = 'spinning_360'
                             self.prev_yaw_for_spin = None
                             self.spin_accumulated = 0.0
@@ -978,7 +956,7 @@ class SamplingTurtlebot(Node):
                 else:
                     self.get_logger().warn(
                         f"[LOCAL SEARCH] No reachable frontier — radius GREW: "
-                        f"{prev_radius} → {self.local_search_radius} cells "
+                        f"{prev_radius} -> {self.local_search_radius} cells "
                         f"(max={self.max_local_search_radius})"
                     )
                 self.find_frontier = True
@@ -996,29 +974,31 @@ class SamplingTurtlebot(Node):
             )
             self.goal_pose = [goal_x, goal_y]
             self.find_frontier = False
-            # Do NOT reset local_search_radius here — the frontier was selected
+            # Do not reset local_search_radius here — the frontier was selected
             # but not yet reached.  If RRT* fails, the radius stays grown so the
             # next search starts from a larger window instead of oscillating 20↔30.
         elif numLabels == 1:
+            # The detection loop found zero frontier pixels — no 
+            # free cells touching unknown space exist inside the search window at all
             if self.use_global_search_window:
                 self.max_radius_wait_count += 1
                 self.get_logger().warn(
                     f"[GLOBAL SEARCH] No frontier cells inside window "
                     f"x=[{self.global_x_min:.1f},{self.global_x_max:.1f}] "
                     f"y=[{self.global_y_min:.1f},{self.global_y_max:.1f}] — "
-                    f"wait count: {self.max_radius_wait_count}/10"
+                    f"wait count: {self.max_radius_wait_count}/{self.global_search_count_threshold}"
                 )
-                if self.max_radius_wait_count >= 10:
+                if self.max_radius_wait_count >= self.global_search_count_threshold:
                     self.find_frontier = False
                     if self.waypoints is not None and len(self.waypoints) > 0:
                         self.get_logger().info(
-                            "Global window exhausted 10 times — following last path "
+                            f"Global window exhausted {self.global_search_count_threshold} times — following last path "
                             f"({len(self.waypoints)} waypoints), then spinning 360°."
                         )
                         self.following_last_path = True
                     else:
                         self.get_logger().info(
-                            "Global window exhausted 10 times — no saved path, "
+                            f"Global window exhausted {self.global_search_count_threshold} times — no saved path, "
                             "spinning 360° in place."
                         )
                         self.rotation_state = 'spinning_360'
@@ -1038,18 +1018,18 @@ class SamplingTurtlebot(Node):
                 self.get_logger().info(
                     f"[LOCAL SEARCH] No frontier cells — radius already at max "
                     f"({self.max_local_search_radius} cells). "
-                    f"Wait count: {self.max_radius_wait_count}/10"
+                    f"Wait count: {self.max_radius_wait_count}/{self.local_search_count_threshold}"
                 )
-                if self.max_radius_wait_count >= 10:
+                if self.max_radius_wait_count >= self.local_search_count_threshold:
                     self.find_frontier = False
                     if self.waypoints is not None and len(self.waypoints) > 0:
                         self.get_logger().info(
-                            "Max radius reached 10 times — following last path to farthest "
+                            f"Max radius reached {self.local_search_count_threshold} times — following last path to farthest "
                             f"clear point ({len(self.waypoints)} waypoints), then spinning 360°."
                         )
                         self.following_last_path = True
                     else:
-                        self.get_logger().info("Max radius reached 10 times — no saved path, spinning 360° in place.")
+                        self.get_logger().info(f"Max radius reached {self.local_search_count_threshold} times — no saved path, spinning 360° in place.")
                         self.rotation_state = 'spinning_360'
                         self.prev_yaw_for_spin = None
                         self.spin_accumulated = 0.0
@@ -1062,7 +1042,7 @@ class SamplingTurtlebot(Node):
                 )
             self.find_frontier = True
             return
-
+    # TODO: Decide whether to keep this function or not?
     def inspect_coordinate_ordering(self, q_start, q_goal):
         """Debug helper to identify row/col vs x/y confusion."""
         self.get_logger().info(f"=== COORDINATE ORDERING INSPECTION ===")
@@ -1083,7 +1063,7 @@ class SamplingTurtlebot(Node):
             self.get_logger().info(f"binary_map[{q_start_int[1]}, {q_start_int[0]}] = {val_as_col_row} (swapped indexing as [col,row])")
             
             if val_as_row_col == 1 and val_as_col_row == 0:
-                self.get_logger().error(f"🔴 COORDINATE BUG DETECTED: Current indexing shows OCCUPIED, swapped indexing shows FREE!")
+                self.get_logger().error(f" COORDINATE BUG DETECTED: Current indexing shows OCCUPIED, swapped indexing shows FREE!")
                 self.get_logger().error(f"   Root cause: q_start/q_goal are in (x,y) format but being indexed as (row,col)")
                 self.get_logger().error(f"   Fix: Swap q_start/q_goal elements before passing to RRT*")
                 return "SWAPPED"
@@ -1096,7 +1076,7 @@ class SamplingTurtlebot(Node):
         if self.binary_map is None or self.robot_pose is None:
             return
 
-        # NEW — following_last_path mode (not in frontier_rrt_tb.py):
+        # Nfollowing_last_path mode (not in frontier_rrt_tb.py):
         # Activated when exploration is truly complete (max radius reached 10 times).
         # Instead of spinning immediately at the current position, the robot follows its
         # last saved waypoint path as far as the path is still collision-free, then spins.
@@ -1115,6 +1095,7 @@ class SamplingTurtlebot(Node):
                     q_wp   = (np.array([wp[0], wp[1]]) - self.origin) / self.resolution
                     wp_pt  = PointRRT(q_wp[0], q_wp[1])
                     seg_len = prev_pt.dist(wp_pt)
+                    # TODO: Need to see the definition of the methods of the BIRRT_STAR class
                     rrt_check.max_depth = max(self.max_depth,
                                               round(math.log(max(seg_len, 2), 2)) + 1)
                     if not rrt_check.is_segment_free_bisection(prev_pt, wp_pt, self.binary_map, 0):
@@ -1134,13 +1115,6 @@ class SamplingTurtlebot(Node):
 
         if self.goal_pose is None:
             return
-        
-        # self.get_logger().info(f"In path loop")
-        # Conversion of robot pose and goal pose to cell coordinate
-        # q_goal = (np.array([self.goal_pose[1], self.goal_pose[0]]) - self.origin) / self.resolution # why do we need to swap between the x and y
-        # q_start = (np.array([self.robot_pose.y, self.robot_pose.x]) - self.origin) / self.resolution
-        # q_goal_point = PointRRT(q_goal[0], q_goal[1])
-        # q_start_point = PointRRT(q_start[0], q_start[1])
 
         q_start = (np.array([self.robot_pose.x, self.robot_pose.y]) - self.origin) / self.resolution
         q_goal  = (np.array([self.goal_pose[0], self.goal_pose[1]]) - self.origin) / self.resolution
@@ -1156,13 +1130,8 @@ class SamplingTurtlebot(Node):
         
         # Check bounds
         map_h, map_w = self.binary_map.shape
-        # q_start_in_bounds = (0 <= q_start[0] < map_h and 0 <= q_start[1] < map_w)
-        # q_goal_in_bounds = (0 <= q_goal[0] < map_h and 0 <= q_goal[1] < map_w)
-
         q_start_in_bounds = (0 <= q_start[0] < map_w and 0 <= q_start[1] < map_h)
-        q_goal_in_bounds  = (0 <= q_goal[0]  < map_w and 0 <= q_goal[1]  < map_h)
-        # self.get_logger().info(f"Start in bounds: {q_start_in_bounds}, Goal in bounds: {q_goal_in_bounds}")
-        
+        q_goal_in_bounds  = (0 <= q_goal[0]  < map_w and 0 <= q_goal[1]  < map_h)        
         if not q_start_in_bounds:
             self.get_logger().warn(f"Start pose is outside map bounds!")
             return
@@ -1177,48 +1146,11 @@ class SamplingTurtlebot(Node):
         # coord_status = self.inspect_coordinate_ordering(q_start, q_goal)
 
         rrt_star = BIRRT_STAR(self.delta_q, self.p, self.max_depth, self.min_dist, self.radius, self.threshold_path_rewire_dist)
-        
-        # Detailed debugging: inspect actual map values at start/goal
-        # q_start_int = np.array([int(q_start[0]), int(q_start[1])])
-        # q_goal_int = np.array([int(q_goal[0]), int(q_goal[1])])
-        
-        # start_cell_value = self.binary_map[q_start_int[0], q_start_int[1]]
-        # goal_cell_value = self.binary_map[q_goal_int[0], q_goal_int[1]]
-
-        # start_cell_value = self.binary_map[q_start_int[1], q_start_int[0]]
-        # goal_cell_value  = self.binary_map[q_goal_int[1],  q_goal_int[0]]
-        
-        # self.get_logger().info(f"START cell value: binary_map[{q_start_int[0]}, {q_start_int[1]}] = {start_cell_value} (0=free, 1=occupied)")
-        # self.get_logger().info(f"GOAL cell value: binary_map[{q_goal_int[0]}, {q_goal_int[1]}] = {goal_cell_value} (0=free, 1=occupied)")
-
-        # # Inspect 3x3 neighborhood around start
-        # self.get_logger().info(f"Start 3x3 neighborhood (rows {q_start_int[0]-1} to {q_start_int[0]+1}, cols {q_start_int[1]-1} to {q_start_int[1]+1}):")
-        # for i in range(max(0, q_start_int[0]-1), min(self.binary_map.shape[0], q_start_int[0]+2)):
-        #     row_str = " ".join([str(int(self.binary_map[i, j])) for j in range(max(0, q_start_int[1]-1), min(self.binary_map.shape[1], q_start_int[1]+2))])
-        #     marker = " <-- START ROW" if i == q_start_int[0] else ""
-        #     self.get_logger().info(f"  Row {i}: [{row_str}]{marker}")
-
-        # # Inspect 3x3 neighborhood around goal
-        # self.get_logger().info(f"Goal 3x3 neighborhood (rows {q_goal_int[0]-1} to {q_goal_int[0]+1}, cols {q_goal_int[1]-1} to {q_goal_int[1]+1}):")
-        # for i in range(max(0, q_goal_int[0]-1), min(self.binary_map.shape[0], q_goal_int[0]+2)):
-        #     row_str = " ".join([str(int(self.binary_map[i, j])) for j in range(max(0, q_goal_int[1]-1), min(self.binary_map.shape[1], q_goal_int[1]+2))])
-        #     marker = " <-- GOAL ROW" if i == q_goal_int[0] else ""
-        #     self.get_logger().info(f"  Row {i}: [{row_str}]{marker}")
-
-        # # Check if start/goal coordinates are swapped or have row/col confusion
-        # # Try the transposed index access to see if that makes it free
-        # if self.binary_map.shape[0] != self.binary_map.shape[1]:  # Non-square map
-        #     start_cell_transposed = self.binary_map[q_start_int[1], q_start_int[0]] if q_start_int[1] < self.binary_map.shape[0] and q_start_int[0] < self.binary_map.shape[1] else None
-        #     if start_cell_transposed is not None:
-        #         self.get_logger().info(f"START cell with transposed indices [col,row]: binary_map[{q_start_int[1]}, {q_start_int[0]}] = {start_cell_transposed}")
-        
-        # NEW — start snapping (not in frontier_rrt_tb.py):
-        # CHANGED from frontier_rrt_tb.py: original just logged an error and continued,
-        # letting RRT* attempt to plan from an occupied start (which always fails).
-        # Now: if start is occupied (localisation drift into inflation zone), find the
+        # start snapping: if start is occupied (due to localization drift), find the
         # nearest free cell via BFS and use that as the planning start.  The resulting
         # path's first waypoint pulls the robot back into clear space.
-        # If no free cell is found within 20 cells the function returns and waits for
+        # If no free cell is found within 20 cells (can be overridden by passing
+        # the desired value into the function parameter) the function returns and waits for
         # the next map update tick (map spikes are usually transient).
         is_start_occupied = rrt_star.is_point_occupied(q_start_point, self.binary_map)
         is_goal_occupied  = rrt_star.is_point_occupied(q_goal_point,  self.binary_map)
@@ -1247,26 +1179,7 @@ class SamplingTurtlebot(Node):
             return
 
         if self.waypoints is not None:
-            # ── OLD: only checked robot → next waypoint ──────────────────────
-            # next_waypoint = self.waypoints[0]
-            # q_next = (np.array([next_waypoint[0], next_waypoint[1]]) - self.origin) / self.resolution
-            # q_next_point = PointRRT(q_next[0], q_next[1])
-            # self.collide_robot_next_waypoint = not rrt_star.is_segment_free_bisection(
-            #     q_start_point, q_next_point, self.binary_map, 0)
-            # if not self.collide_robot_next_waypoint:
-            #     for wp in self.waypoints:
-            #         q_wp = (np.array([wp[0], wp[1]]) - self.origin) / self.resolution
-            #         q_wp_point = PointRRT(q_wp[0], q_wp[1])
-            #         if rrt_star.is_point_occupied(q_wp_point, self.binary_map):
-            #             self.collide_robot_next_waypoint = True
-            #             self.get_logger().warn("A downstream waypoint is now inside an obstacle — forcing replan")
-            #             break
-            # if self.collide_robot_next_waypoint:
-            #     self.get_logger().warn("Path to next waypoint is not clear. Stop and replan")
-            #     stop_msg = Twist()
-            #     self.cmd_vel_pub.publish(stop_msg)
-
-            # ── NEW: check every segment robot→wp[0], wp[0]→wp[1], … ─────────
+            # check every segment robot->wp[0], wp[0]->wp[1], … 
             # max_depth is scaled per-segment so long smoothed segments are sampled
             # densely enough to catch any obstacle narrower than the segment length.
             prev_point = q_start_point
@@ -1284,16 +1197,17 @@ class SamplingTurtlebot(Node):
 
             if self.collide_robot_next_waypoint:
                 self.get_logger().warn(f"Path segment is now blocked — stopping and replanning")
+                # Empty message to bring the robot to a stop
                 self.cmd_vel_pub.publish(Twist())
 
         if self.complete_a_path is False and not self.collide_robot_next_waypoint: 
-            return
+            return # if the robot is currently mid-path AND there is no 
+                    # collision detected, do nothing — no replanning needed.
         else:
             path = []
             self.get_logger().info(f"Planning a path from {q_start} to {q_goal}")
             self.get_logger().info(f"RRT* params: delta_q={self.delta_q}, p={self.p}, max_iter={self.max_iterations}, min_dist={self.min_dist}, radius={self.radius}")
-            # CHANGED from frontier_rrt_tb.py: was rrt_star = RRT_STAR(...); sample(...).
-            # Now uses BIRRT_STAR which grows two trees simultaneously (T_a from start,
+            # BIRRT_STAR grows two trees simultaneously (T_a from start,
             # T_b from goal) and connects them when they come within min_dist cells.
             # Two separate viz callbacks are created — one per tree, with separate
             # publishers, colours, and z-heights so both appear independently in RViz.
@@ -1310,31 +1224,24 @@ class SamplingTurtlebot(Node):
             flush_a()   # force-publish final T_a state
             flush_b()   # force-publish final T_b state
             self.get_logger().info(f"RRT* sampling completed: iterations={iter}, tree size={len(G)}, edges={len(edges)}")
-            # NEW — adaptive iteration budget with same-goal retry (not in frontier_rrt_tb.py):
-            # CHANGED from frontier_rrt_tb.py: original immediately set find_frontier=True
-            # and goal_pose=None on any failure, discarding the goal and picking a new one.
-            # Problem: the increased max_iterations (for the next attempt) was wasted on a
-            # completely different goal rather than retrying the hard-to-reach original.
-            #
-            # New logic:
-            #   rrt_fail_count < MAX_RETRIES_SAME_GOAL (3):
-            #     → keep same goal, increase max_iterations by 2000, retry next tick.
+            #   rrt_fail_count < self.max_retry_same_goal(=3):
+            #     -> keep same goal, increase max_iterations by self.max_iterations_increment(=2000), retry next tick.
             #       control_loop sets complete_a_path=True when it sees waypoints=None,
             #       which re-triggers path_planning_loop with the same goal_pose.
             #   rrt_fail_count >= 3:
-            #     → give up on this goal; reset counters; let frontier_viewpoint pick new goal.
+            #     -> give up on this goal; reset counters; let frontier_viewpoint pick new goal.
             if iter == self.max_iterations and len(edges) == 0:
                 self.rrt_fail_count += 1
                 self.max_iterations = min(
-                    self.max_iterations_base + self.rrt_fail_count * 2000,
+                    self.max_iterations_base + self.rrt_fail_count * self.max_iterations_increment,
                     self.max_iterations_cap
                 )
-                MAX_RETRIES_SAME_GOAL = 3
-                if self.rrt_fail_count < MAX_RETRIES_SAME_GOAL:
+    
+                if self.rrt_fail_count < self.max_retry_same_goal:
                     # Retry same goal with more iterations — control_loop will set
                     # complete_a_path=True via the waypoints=None branch, re-triggering planning
                     self.get_logger().warn(
-                        f"RRT* failed (attempt {self.rrt_fail_count}/{MAX_RETRIES_SAME_GOAL}). "
+                        f"RRT* failed (attempt {self.rrt_fail_count}/{self.max_retry_same_goal}). "
                         f"Retrying same goal with {self.max_iterations} iterations."
                     )
                     self.waypoints = None   # stop robot while replanning
@@ -1377,8 +1284,7 @@ class SamplingTurtlebot(Node):
     def normalize_angle(self, angle):
         return math.atan2(math.sin(angle), math.cos(angle))
 
-    # ── Arm retraction ────────────────────────────────────────────────────────
-
+    # Arm retraction 
     def _joint_state_cb(self, msg: JointState):
         pos_map = dict(zip(msg.name, msg.position))
         if 'turtlebot/swiftpro/joint2' in pos_map:
@@ -1421,10 +1327,10 @@ class SamplingTurtlebot(Node):
         self.arm_cmd_pub.publish(cmd)
         return False
 
-    # ─────────────────────────────────────────────────────────────────────────
+   # Control Loop
 
     def control_loop(self):
-        # ── Terminal states ───────────────────────────────────────────────────
+        # Terminal states 
         if self.rotation_state == 'halted':
             self.cmd_vel_pub.publish(Twist())
             return
@@ -1434,8 +1340,7 @@ class SamplingTurtlebot(Node):
                 self.prev_yaw_for_spin = self.current_yaw
                 self.spin_accumulated = 0.0
             else:
-                # OLD: delta = abs(self.normalize_angle(self.current_yaw - self.prev_yaw_for_spin))
-                # NEW: Handle angle wrap-around explicitly (more robust at ±π boundary)
+                # Handle angle wrap-around explicitly (more robust at ±π boundary)
                 delta = self.current_yaw - self.prev_yaw_for_spin
                 if delta > math.pi:
                     delta -= 2 * math.pi
@@ -1452,7 +1357,7 @@ class SamplingTurtlebot(Node):
                 cmd.angular.z = self.max_angular_velocity
                 self.cmd_vel_pub.publish(cmd)
             return
-        # ─────────────────────────────────────────────────────────────────────
+        
 
         # self.get_logger().info(f"In control loop received waypoint {self.waypoints}")
         if self.waypoints is None or len(self.waypoints) == 0:
@@ -1465,11 +1370,11 @@ class SamplingTurtlebot(Node):
             self._step_arm_to_retract()
             return
 
-        # ── Arm must be retracted before any base motion ─────────────────────
+        # Arm must be retracted before any base motion 
         if not self._step_arm_to_retract():
             self.cmd_vel_pub.publish(Twist())   # hold base while arm retracts
             return
-        # ─────────────────────────────────────────────────────────────────────
+       
 
         self.complete_a_path = False
         next_waypoint = self.waypoints[0]
@@ -1496,8 +1401,7 @@ class SamplingTurtlebot(Node):
                 self.prev_yaw_for_spin = self.current_yaw
                 self.spin_accumulated = 0.0
             else:
-                # OLD: delta = abs(self.normalize_angle(self.current_yaw - self.prev_yaw_for_spin))
-                # NEW: Handle angle wrap-around explicitly (more robust at ±π boundary)
+                # Handle angle wrap-around explicitly (more robust at ±π boundary)
                 delta = self.current_yaw - self.prev_yaw_for_spin
                 if delta > math.pi:
                     delta -= 2 * math.pi
@@ -1538,9 +1442,7 @@ class SamplingTurtlebot(Node):
                         self.prev_yaw_for_spin = None
                         self.spin_accumulated = 0.0
                     else:
-                        # NEW — frontier tracking and count-based window expansion
-                        # (not in frontier_rrt_tb.py):
-                        #
+                        # frontier tracking and count-based window expansion
                         # 1. Save the just-reached goal as a visited position BEFORE
                         #    clearing goal_pose.  This populates the blacklist used by
                         #    frontier_viewpoint to avoid revisiting the same area.
@@ -1553,10 +1455,7 @@ class SamplingTurtlebot(Node):
                         #    frontier_expand_step cells so the search window gradually
                         #    covers more of the environment as exploration progresses,
                         #    without needing to exhaust the failure-based expansion first.
-                        #
-                        # CHANGED from frontier_rrt_tb.py: original reset local_search_radius
-                        # to 20 on every successful navigation.  That reset is removed here
-                        # because the global-anchor window should only ever grow, not shrink.
+
                         if reached_goal is not None:
                             self.visited_frontier_positions.append(
                                 (float(reached_goal[0]), float(reached_goal[1]))
