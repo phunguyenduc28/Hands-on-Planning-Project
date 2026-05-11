@@ -1402,8 +1402,8 @@ class SamplingTurtlebot(Node):
                 penalty += 0.5
             elif val > 10:
                 penalty += 0.2
-        return penalty / max(1, len(sampled))
-
+        # return penalty / max(1, len(sampled))
+        return penalty
     def _dwa_dynamic_window(self):
         """Reachable (v, w) range given the robot's current velocity and
         acceleration limits over one control tick (dt = 0.1 s)."""
@@ -1477,9 +1477,18 @@ class SamplingTurtlebot(Node):
                         self.dwa_velocity_w * (self.max_linear_velocity - v))
 
                 all_paths.append({'v': v, 'w': w, 'traj': traj, 'cost': cost})
+                
+                # DEBUG: Log top candidates for inspection
                 if cost < best_cost:
                     best_cost = cost
                     best_v, best_w = v, w
+                    self.get_logger().debug(
+                        f"[DWA] New best: v={v:.3f}, w={w:.3f}, cost={cost:.4f} "
+                        f"(heading={self.dwa_heading_w*heading_err:.2f}, "
+                        f"dist={self.dwa_dist_w*dist:.2f}, "
+                        f"obs={self.dwa_obstacle_w*obs_cost:.2f}, "
+                        f"vel={self.dwa_velocity_w*(self.max_linear_velocity - v):.2f})"
+                    )
 
         return best_v, best_w, all_paths
 
