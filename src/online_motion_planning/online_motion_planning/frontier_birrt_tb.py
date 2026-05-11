@@ -6,6 +6,7 @@ import math
 from matplotlib import pyplot as plt
 
 from geometry_msgs.msg import Pose, PoseStamped, Twist, Point
+from std_msgs.msg import ColorRGBA
 from nav_msgs.msg import Odometry, OccupancyGrid
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
@@ -162,6 +163,34 @@ class SamplingTurtlebot(Node):
         self.rrt_tree_a_pub = self.create_publisher(Marker, '/rrt_viz/tree_a', 10)  # T_a — start tree (blue)
         self.rrt_tree_b_pub = self.create_publisher(Marker, '/rrt_viz/tree_b', 10)  # T_b — goal  tree (orange)
         self.cmd_vel_pub = self.create_publisher(Twist, '/turtlebot/cmd_vel', 10)
+        # DWA trajectory visualisation — green = chosen trajectory, yellow = candidates
+        self.dwa_traj_pub = self.create_publisher(MarkerArray, '/dwa_trajectories', 10)
+
+        # ── DWA local planner parameters ──────────────────────────────────────
+        # DWA replaces the pure-pursuit velocity command between waypoints.
+        # It samples (v, w) pairs within the dynamic window, simulates each
+        # trajectory forward in time, scores them against heading / distance /
+        # obstacle / velocity costs, and picks the lowest-cost command.
+        self.dwa_max_accel     = 0.8    # m/s²   — max linear acceleration
+        self.dwa_max_delta_yaw = 1.2    # rad/s² — max angular acceleration
+        self.dwa_predict_time  = 2.5    # s      — trajectory simulation horizon
+        self.dwa_heading_w     = 8.0    # weight: alignment with waypoint direction
+        self.dwa_dist_w        = 6.0    # weight: distance to waypoint
+        self.dwa_obstacle_w    = 8.0    # weight: proximity to obstacles
+        self.dwa_velocity_w    = 0.5    # weight: prefer higher forward speed
+
+        # Current robot velocity [v, w] — updated by odom_callback, needed by DWA
+        # to compute the reachable dynamic window each tick.
+        self.current_vel = [0.0, 0.0]
+
+        # Raw OccupancyGrid message — DWA needs .info and .data directly to evaluate
+        # obstacle costs along simulated trajectories.
+        self.inflated_map_msg = None
+
+        # dwa_viz_time: how many seconds to simulate when drawing trajectories in RViz.
+        # Increase to see longer projected paths; decrease if they clutter the view.
+        # This is independent of dwa_predict_time (which controls the actual planning).
+        self.dwa_viz_time = 4.0
 
         # Timers — same rates as frontier_rrt_tb.py
         self.control_timer = self.create_timer(0.1, self.control_loop)       # 10 Hz
@@ -237,6 +266,8 @@ class SamplingTurtlebot(Node):
 
     def odom_callback(self, msg):
         self.robot_pose = msg.pose.pose.position
+        # Store current [v, w] so DWA can compute the reachable dynamic window
+        self.current_vel = [msg.twist.twist.linear.x, msg.twist.twist.angular.z]
         # latch the very first pose as the global search
         # window anchor.  Fires exactly once; subsequent messages only update robot_pose
         # and current_yaw as before.
@@ -252,6 +283,8 @@ class SamplingTurtlebot(Node):
         self.current_yaw = math.atan2(siny_cosp, cosy_cosp)
 
     def map_callback(self, msg):
+        # Store the raw message so DWA can query cell values via .info and .data
+        self.inflated_map_msg = msg
         info = msg.info
         self.resolution = info.resolution
         self.width = info.width
@@ -1327,7 +1360,196 @@ class SamplingTurtlebot(Node):
         self.arm_cmd_pub.publish(cmd)
         return False
 
-   # Control Loop
+    # ── DWA local planner ────────────────────────────────────────────────────
+    # These methods are adapted from dwa_planner/control_tb.py.
+    # Key difference: _dwa_compute() accepts an explicit (goal_x, goal_y) so
+    # it targets the current waypoint, not the distant frontier goal.
+
+    def _dwa_get_cell_value(self, x, y):
+        """Look up the inflated-map cost at world position (x, y)."""
+        if self.inflated_map_msg is None:
+            return None
+        info = self.inflated_map_msg.info
+        gx = int((x - info.origin.position.x) / info.resolution)
+        gy = int((y - info.origin.position.y) / info.resolution)
+        if 0 <= gx < info.width and 0 <= gy < info.height:
+            return self.inflated_map_msg.data[gy * info.width + gx]
+        return None
+
+    def _dwa_obstacle_cost(self, traj):
+        """Soft obstacle penalty along a trajectory.
+
+        Lethal threshold is >= 99 (inscribed radius / wall), matching the
+        binary_map threshold used by RRT*.  The original DWA used > 50 which
+        treated the entire inflation gradient (1-98) as a wall, causing every
+        trajectory to return inf when the robot is anywhere near a wall and
+        resulting in v=0, w=0 (robot stuck).
+
+        Soft penalties are still applied for cells 10-98 so DWA still prefers
+        paths away from walls even inside the passable inflation zone.
+        """
+        if self.inflated_map_msg is None:
+            return 0.0
+        penalty = 0.0
+        sampled = traj[::3]   # sample every 3rd point for speed
+        for x, y, _ in sampled:
+            val = self._dwa_get_cell_value(x, y)
+            if val is None or val >= 99:   # lethal: wall footprint or wall itself
+                return float('inf')
+            if val > 50:
+                penalty += 1.0   # heavy penalty — close to wall but still passable
+            elif val > 30:
+                penalty += 0.5
+            elif val > 10:
+                penalty += 0.2
+        return penalty / max(1, len(sampled))
+
+    def _dwa_dynamic_window(self):
+        """Reachable (v, w) range given the robot's current velocity and
+        acceleration limits over one control tick (dt = 0.1 s)."""
+        v, w = self.current_vel
+        dt = 0.1
+        v_min = max(0.0,                  v - self.dwa_max_accel     * dt)
+        v_max = min(self.max_linear_velocity, v + self.dwa_max_accel * dt)
+        w_min = max(-self.max_angular_velocity, w - self.dwa_max_delta_yaw * dt)
+        w_max = min( self.max_angular_velocity, w + self.dwa_max_delta_yaw * dt)
+        return v_min, v_max, w_min, w_max
+
+    def _dwa_simulate_trajectory(self, v, w, predict_time=None):
+        """Forward-simulate the robot's pose.
+
+        predict_time defaults to dwa_predict_time (2.5 s).  A shorter value is
+        passed by _dwa_compute when the robot is close to the waypoint so that
+        simulated trajectories don't extend past it into unknown / out-of-map
+        space — which would cause every trajectory to return obstacle cost = inf
+        (val = None → inf) and lock DWA into outputting v=0, w=0.
+        """
+        if predict_time is None:
+            predict_time = self.dwa_predict_time
+        x, y, yaw = self.robot_pose.x, self.robot_pose.y, self.current_yaw
+        dt = 0.1
+        traj = []
+        for _ in range(max(1, int(predict_time / dt))):
+            x   += v * math.cos(yaw) * dt
+            y   += v * math.sin(yaw) * dt
+            yaw += w * dt
+            traj.append((x, y, yaw))
+        return traj
+
+    def _dwa_compute(self, goal_x, goal_y):
+        """Evaluate all (v, w) combinations in the dynamic window and return
+        the lowest-cost command together with all candidate trajectories for
+        visualisation.  goal_x/goal_y is the current waypoint in world metres.
+
+        The prediction horizon is clipped to max(dist_to_goal / max_speed, 0.5 s)
+        so trajectories never extend far past the waypoint into unknown space.
+        """
+        dist_to_goal = math.hypot(goal_x - self.robot_pose.x,
+                                  goal_y - self.robot_pose.y)
+        # Time needed to reach the goal at max speed; minimum 0.5 s to keep
+        # the horizon sensible, maximum dwa_predict_time.
+        horizon = max(0.5, min(self.dwa_predict_time,
+                               dist_to_goal / max(self.max_linear_velocity, 0.01)))
+
+        v_min, v_max, w_min, w_max = self._dwa_dynamic_window()
+        best_v, best_w = 0.0, 0.0
+        best_cost = float('inf')
+        all_paths = []
+
+        for v in np.arange(v_min, v_max + 0.01, 0.03):
+            for w in np.arange(w_min, w_max + 0.01, 0.06):
+                traj = self._dwa_simulate_trajectory(v, w, predict_time=horizon)
+                obs_cost = self._dwa_obstacle_cost(traj)
+                if obs_cost == float('inf'):
+                    continue
+
+                lx, ly, lyaw = traj[-1]
+                goal_angle  = math.atan2(goal_y - ly, goal_x - lx)
+                heading_err = abs(math.atan2(
+                    math.sin(goal_angle - lyaw),
+                    math.cos(goal_angle - lyaw)
+                ))
+                dist = math.hypot(goal_x - lx, goal_y - ly)
+
+                cost = (self.dwa_heading_w  * heading_err +
+                        self.dwa_dist_w     * dist +
+                        self.dwa_obstacle_w * obs_cost +
+                        self.dwa_velocity_w * (self.max_linear_velocity - v))
+
+                all_paths.append({'v': v, 'w': w, 'traj': traj, 'cost': cost})
+                if cost < best_cost:
+                    best_cost = cost
+                    best_v, best_w = v, w
+
+        return best_v, best_w, all_paths
+
+    def _dwa_publish_paths(self, paths, bv, bw):
+        """Publish DWA trajectories to /dwa_trajectories.
+
+        All trajectories (including the best) are re-simulated with dwa_viz_time
+        so the visualised paths are longer than the planning horizon — making them
+        easy to see in RViz regardless of how close the next waypoint is.
+
+        Visual scheme:
+          Best trajectory  — thick BRIGHT YELLOW (0.1 wide, z=0.3, fully opaque)
+          Candidate paths  — thin  LIGHT GREY    (0.02 wide, z=0.05, a=0.35)
+        The strong colour contrast makes it immediately obvious which trajectory
+        was chosen without needing to decode a colour scale.
+        """
+        if self.inflated_map_msg is None:
+            return
+        marker_array = MarkerArray()
+        now   = self.get_clock().now().to_msg()
+        frame = self.inflated_map_msg.header.frame_id
+        lifetime = rclpy.duration.Duration(seconds=0.3).to_msg()
+
+        # First draw all candidates (low z), then the best (high z) so it's always on top
+        candidate_id = 0
+        for p in paths[::3]:                           # downsample candidates
+            is_best = abs(p['v'] - bv) < 1e-3 and abs(p['w'] - bw) < 1e-3
+            if is_best:
+                continue                                # drawn separately below
+            m = Marker()
+            m.header.frame_id = frame
+            m.header.stamp    = now
+            m.ns       = "dwa_candidates"
+            m.id       = candidate_id
+            m.type     = Marker.LINE_STRIP
+            m.action   = Marker.ADD
+            m.scale.x  = 0.02
+            m.color    = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.35)   # light grey
+            m.pose.orientation.w = 1.0
+            m.lifetime = lifetime
+            # Re-simulate with viz horizon for longer paths
+            viz_traj = self._dwa_simulate_trajectory(p['v'], p['w'],
+                                                     predict_time=self.dwa_viz_time)
+            for x, y, _ in viz_traj:
+                pt = Point(); pt.x = float(x); pt.y = float(y); pt.z = 0.05
+                m.points.append(pt)
+            marker_array.markers.append(m)
+            candidate_id += 1
+
+        # Best trajectory — drawn last so it renders on top
+        m = Marker()
+        m.header.frame_id = frame
+        m.header.stamp    = now
+        m.ns       = "dwa_best"
+        m.id       = 0                       # single marker, always replaces previous
+        m.type     = Marker.LINE_STRIP
+        m.action   = Marker.ADD
+        m.scale.x  = 0.10                   # thick so it stands out clearly
+        m.color    = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)   # bright yellow
+        m.pose.orientation.w = 1.0
+        m.lifetime = lifetime
+        viz_traj = self._dwa_simulate_trajectory(bv, bw, predict_time=self.dwa_viz_time)
+        for x, y, _ in viz_traj:
+            pt = Point(); pt.x = float(x); pt.y = float(y); pt.z = 0.30
+            m.points.append(pt)
+        marker_array.markers.append(m)
+
+        self.dwa_traj_pub.publish(marker_array)
+
+    # ── Control Loop ──────────────────────────────────────────────────────────
 
     def control_loop(self):
         # Terminal states 
@@ -1491,13 +1713,33 @@ class SamplingTurtlebot(Node):
                 # else: stay in 'moving' and proceed directly to the next waypoint
                 return
 
-            desired_yaw = math.atan2(inc_y, inc_x)
-            angle_diff  = self.normalize_angle(desired_yaw - self.current_yaw)
-            cmd = Twist()
-            cmd.angular.z = min(self.kw * angle_diff, self.max_angular_velocity)
-            if abs(angle_diff) <= 0.3:
-                cmd.linear.x = min(self.kv * dist, self.max_linear_velocity)
-            self.cmd_vel_pub.publish(cmd)
+            # ── OLD: pure pursuit ────────────────────────────────────────────
+            # desired_yaw = math.atan2(inc_y, inc_x)
+            # angle_diff  = self.normalize_angle(desired_yaw - self.current_yaw)
+            # cmd = Twist()
+            # cmd.angular.z = min(self.kw * angle_diff, self.max_angular_velocity)
+            # if abs(angle_diff) <= 0.3:
+            #     cmd.linear.x = min(self.kv * dist, self.max_linear_velocity)
+            # self.cmd_vel_pub.publish(cmd)
+            # ── NEW: DWA local planner ───────────────────────────────────────
+            # Targets the current waypoint so each segment is executed with
+            # obstacle-aware velocity control.  Falls back to pure pursuit if
+            # the inflated map hasn't arrived yet.
+            if self.inflated_map_msg is not None:
+                v, w, paths = self._dwa_compute(next_waypoint[0], next_waypoint[1])
+                cmd = Twist()
+                cmd.linear.x  = float(v)
+                cmd.angular.z = float(w)
+                self.cmd_vel_pub.publish(cmd)
+                self._dwa_publish_paths(paths, v, w)
+            else:
+                desired_yaw = math.atan2(inc_y, inc_x)
+                angle_diff  = self.normalize_angle(desired_yaw - self.current_yaw)
+                cmd = Twist()
+                cmd.angular.z = min(self.kw * angle_diff, self.max_angular_velocity)
+                if abs(angle_diff) <= 0.3:
+                    cmd.linear.x = min(self.kv * dist, self.max_linear_velocity)
+                self.cmd_vel_pub.publish(cmd)
         
     def publish_positions_as_markers(self, positions):
         """
