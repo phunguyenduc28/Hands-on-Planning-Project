@@ -1,0 +1,78 @@
+# exploration_params.yaml
+# All tunable parameters for the simulation exploration pipeline.
+# Loaded by exploration_sim.launch.py.
+# Node names here must match the 'name:' given in the launch file.
+
+# ── Image crop (image_utils) ────────────────────────────────────────────────
+image_crop_node:
+  ros__parameters:
+    # Fraction of image height removed from the BOTTOM for RTAB-Map (removes floor)
+    crop_bottom_fraction: 0.49
+    # Fraction removed from the TOP of the scan depth image (removes robot arm)
+    scan_crop_top_fraction: 0.25
+    # Fraction removed from the BOTTOM of the scan depth image (removes floor)
+    scan_crop_bottom_fraction: 0.49
+    # Spatial outlier filter for the fake laser scan depth slice
+    depth_filter_enabled: true
+    depth_outlier_threshold: 0.3
+
+# ── Arm retraction (online_motion_planning) ─────────────────────────────────
+arm_retract_node:
+  ros__parameters:
+    is_sim: true
+
+# ── Global costmap — grid_mapping (renamed 'global_costmap' in launch) ──────
+global_costmap:
+  ros__parameters:
+    map_frame: world_enu
+    inflation_radius: 0.25
+
+# ── DWA local costmap — dwa_planner (renamed 'dwa_local_costmap' in launch) ─
+dwa_local_costmap:
+  ros__parameters:
+    map_frame: world_enu
+    laser_frame: turtlebot/rplidar
+    grid_size: 2.0
+    grid_resolution: 0.05
+    inflation_radius: 0.2
+
+# ── DWA service (dwa_planner) ───────────────────────────────────────────────
+dwa_service_node:
+  ros__parameters:
+    inflated_map_topic: /inflated_map_dwa
+    # Dead zone disabled in simulation (robot responds to any velocity)
+    vel_deadzone_linear: 0.0
+    vel_deadzone_angular: 0.0
+
+# ── Frontier detection (online_motion_planning) ──────────────────────────────
+frontier_node:
+  ros__parameters:
+    map_frame: world_enu
+    # Minimum distance (m) from the robot for a frontier to be accepted.
+    # Lowered from 0.5 to avoid rejection at startup on a small map.
+    min_frontier_dist_m: 0.2
+    # Radius (m) within which a previously visited frontier is suppressed.
+    visited_frontier_radius_m: 0.5
+    # true  → fixed world_enu search rectangle (global_x/y_min/max)
+    # false → robot-centred growing square
+    use_global_search_window: true
+    # World-enu bounds of the exploration rectangle (metres).
+    # Tune these to match the actual room dimensions.
+    global_x_min: -3.5
+    global_x_max:  3.0
+    global_y_min: -5.0
+    global_y_max:  1.0
+
+# ── Path planner / BiRRT* (online_motion_planning) ──────────────────────────
+path_planner_tb:
+  ros__parameters:
+    map_frame: world_enu
+    is_sim: true
+    # Waypoint acceptance radius (m): robot considers a waypoint reached when
+    # it is within this distance.
+    acceptance_radius: 0.1
+    # Distance the robot must travel (m) before doing a new 360° scan.
+    scan_distance_threshold: 0.4
+    # Maximum BiRRT* iterations per planning call.
+    # Increase if the planner often fails in cluttered environments.
+    max_iterations: 4000

@@ -1,0 +1,52 @@
+# exploration_real_params.yaml
+# Parameters for the real-robot exploration pipeline.
+# TF frames use bare names (no turtlebot/ namespace prefix) as published by
+# the real robot drivers.  RTAB-Map and robot base drivers must be running
+# externally before launching turtlebot_real_test.launch.py.
+# Loaded by turtlebot_real_test.launch.py.
+
+# ── Global costmap — grid_mapping ─────────────────────────────────────────────
+# Subscribes to RTAB-Map's /map → inflates → /inflated_map
+# Used by frontier_node (BFS + BiRRT*).
+global_costmap:
+  ros__parameters:
+    map_frame: odom
+    inflation_radius: 0.25
+
+# ── DWA local costmap — dwa_planner ──────────────────────────────────────────
+# Builds a sliding-window costmap from the real RPLidar scan.
+# Subscribes to /turtlebot/scan → publishes /map_dwa and /inflated_map_dwa.
+dwa_local_costmap:
+  ros__parameters:
+    map_frame: odom
+    laser_frame: rplidar
+    grid_size: 2.0
+    grid_resolution: 0.05
+    inflation_radius: 0.2
+
+# ── DWA service (dwa_planner) ───────────────────────────────────────────────
+dwa_service_node:
+  ros__parameters:
+    inflated_map_topic: /inflated_map_dwa
+    # Real robot dead zone: commands below these thresholds are ignored by
+    # the motor controllers and the robot does not move.
+    vel_deadzone_linear: 0.3
+    vel_deadzone_angular: 0.5
+
+# ── Frontier detection (online_motion_planning) ──────────────────────────────
+frontier_node:
+  ros__parameters:
+    map_frame: odom
+    min_frontier_dist_m: 0.2
+    visited_frontier_radius_m: 0.5
+    # Robot-centred growing window — does not require knowing the room bounds.
+    use_global_search_window: false
+
+# ── Path planner / BiRRT* (online_motion_planning) ──────────────────────────
+path_planner_tb:
+  ros__parameters:
+    map_frame: odom
+    is_sim: false
+    acceptance_radius: 0.15
+    scan_distance_threshold: 0.4
+    max_iterations: 4000

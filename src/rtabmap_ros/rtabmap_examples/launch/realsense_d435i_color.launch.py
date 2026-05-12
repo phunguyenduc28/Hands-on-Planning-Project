@@ -1,0 +1,166 @@
+# Requirements:
+#   A realsense D435i
+#   Install realsense2 ros2 package (ros-$ROS_DISTRO-realsense2-camera)
+# Example:
+#   $ ros2 launch rtabmap_examples realsense_d435i_color.launch.py
+
+import os
+import math
+
+from ament_index_python.packages import get_package_share_directory
+
+from launch import LaunchDescription
+from launch_ros.actions import Node, SetParameter
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, Command, PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def generate_launch_description():
+    # Locate packages
+    pkg_turtlebot_desc = FindPackageShare('turtlebot_description')
+
+    # Process Xacro for robot description
+    robot_description_content = Command([
+        'xacro ',
+        PathJoinSubstitution([pkg_turtlebot_desc, 'urdf', 'turtlebot.urdf.xacro']),
+        ' mobile_base_namespace:=""',
+        ' manipulator_namespace:=swiftpro'
+    ])
+    robot_description = {'robot_description': ParameterValue(value=robot_description_content, value_type=str)}
+
+    # Standard parameters for Stonefish simulation
+    parameters=[{
+          'frame_id': 'turtlebot/base_footprint',  # Match your localisation_node
+        #   'frame_id': 'base_footprint',  # Match your localisation_node
+          'subscribe_depth': False,
+          'subscribe_scan': True,           # Enable LiDAR subscription
+          'approx_sync': True,              # Essential for sim sensors
+        #   'use_sim_time': True,             # Essential for sim clock
+          'wait_imu_to_init': True,
+          'odom_frame_id': 'world_enu',  # Match your localisation_node
+        #   'odom_frame_id': 'odom',  # Match your localisation_node
+
+          'Reg/Force3DoF': 'true',         # Constrain to 2D plane
+          'Reg/Strategy': '1',              # Use Visual (0) not ICP (1) for fake lasers
+          'enable_sync': True
+        #   'odometry_node_name': '/turtlebot/diff_drive_odometry',
+    }]
+
+    # Topic mapping for Stonefish
+    remappings=[
+        ('imu', '/turtlebot/imu'),
+        ('rgb/image', '/turtlebot/camera/color/image_cropped'),
+        ('rgb/camera_info', '/turtlebot/camera/color/camera_info_cropped'),
+        ('depth/image', '/turtlebot/camera/depth/image_cropped'),
+        ('depth/camera_info', '/turtlebot/camera/depth/camera_info_cropped'),
+
+        ('scan', '/turtlebot/fake_scan'),
+        ('rtabmap/base_controller/odom', '/turtlebot/odom'),
+        ] # The output from depth_to_laserscan
+
+    return LaunchDescription([
+
+        # SetParameter(name='use_sim_time', value=True),
+        # Launch arguments
+        DeclareLaunchArgument(
+            'unite_imu_method', default_value='0',
+            description='0-None, 1-copy, 2-linear_interpolation. Use unite_imu_method:="1" if imu topics stop being published.'),
+
+        # Make sure IR emitter is enabled
+        SetParameter(name='depth_module.emitter_enabled', value=1),
+        
+        DeclareLaunchArgument(
+            'args', default_value='',
+            description='Extra arguments set to rtabmap and odometry nodes.'),
+        
+        DeclareLaunchArgument(
+            'odom_args', default_value='',
+            description='Extra arguments just for odometry node. If the same argument is already set in \"args\", it will be overwritten by the one in \"odom_args\".'),
+
+
+        # Uses image_scan_cropped: top+bottom cropped + spatial outlier filtered
+        # (arm and floor removed) — produced by image_crop_node.
+        Node(
+            package='depthimage_to_laserscan',
+            executable='depthimage_to_laserscan_node',
+            name='depthimage_to_laserscan',
+            remappings=[
+                ('depth',            '/turtlebot/camera/depth/image_scan_cropped'),
+                ('depth_camera_info', '/turtlebot/camera/depth/camera_info_scan_cropped'),
+                ('scan',             '/turtlebot/fake_scan'),
+            ],
+            parameters=[{'range_max': 1.5, 'output_frame': 'camera_link',
+                         'range_min': 0.28}]
+        ),
+
+        
+        Node(
+            package='rtabmap_sync', executable='rgbd_sync', output='screen',
+            parameters=[{'approx_sync_max_interval': 0.02,
+                         'sync_queue_size': 1000,
+                        'topic_queue_size': 1000,
+                        'queue_size': 1000}
+                        ],
+            remappings=remappings),
+        
+
+        Node(
+            package='rtabmap_slam', executable='rtabmap', output='screen',
+            # prefix=['gnome-terminal -- gdb -ex run --args'],
+            parameters=[{
+                'frame_id': 'turtlebot/base_footprint',
+                # 'frame_id': 'base_footprint', # Match your localisation_node
+                # 'subscribe_depth': True,
+                'subscribe_scan': True,                # : Subscribe to the fake scan
+                'subscribe_rgbd': False,
+                'approx_sync': True,
+                'visual_odometry': 'false',
+                'odom_topic': '/turtlebot/odom',                 # Connect to your localisation_node
+                'sync_queue_size': 1000,
+                'topic_queue_size': 1000,
+                'map_always_update': True,                 # CRITICAL: Keep map updating even if no features are detected
+                # 'subscribe_odom_info': True,
+                # 'use_sim_time': True,
+                'wait_imu_to_init': True,
+                'odom_frame_id': 'world_enu',  
+                # 'odom_frame_id': 'odom',  # Connect to your localisation_node
+                'map_frame_id': 'world_enu',
+                # 'map_frame_id': 'odom',
+                'publish_tf': False,
+                'Optimizer/Strategy': '1',        # Switch to g2o to prevent GTSAM crash
+                'Optimizer/GravitySigma':'0', # Disable imu constraints (we are already in 2D)
+
+                # RTAB-Map Specific Tuning
+                'Grid/Sensor': '0',                      # 0=LaserScan, 1=Depth Cloud. Set to 0 for fake laser.
+                # 2. Define the clearing distance
+                'Grid/RangeMax': '2.0',           # : Clear space up to 10 meters even if nothing is hit
+                'Grid/RangeMin': '0.28',            # Optional: Ignore very close readings that may be noisy
+                'Grid/RayTracing': 'true',        # Ensure ray tracing is enabled (usually default)
+                'Grid/Scan2dUnknownSpaceFilled': 'true',  # CRITICAL: Clears space even if scan is empty
+                # 'Grid/FromDepth': 'false',             # Create occupancy grid from laser scan, not depth
+                'Reg/Strategy': '0',                   # 0=Visual, 1=ICP. Use 0 because camera FOV is too narrow for ICP
+                'Reg/Force3DoF': 'true',               # Force 2D mapping (x, y, yaw)
+                'RGBD/ProximityBySpace': 'false',      # Recommended false for narrow FOV setupsx   
+                'RGBD/AngularUpdate': '0.01',          # Update map for small rotations
+                'RGBD/LinearUpdate': '0.01',           # Update map for small movements
+                'RGBD/OptimizeFromGraphEnd': 'false',  # Standard SLAM optimization
+                # 'Vis/MinInliers': '10',                # Minimum features for a valid transformat ion
+                'Vis/MinInliers': '20',          # was 10 — require more feature matches before accepting
+                'Vis/InlierDistance': '0.05',    # tighter inlier threshold
+                'Mem/RehearsalSimilarity': '0.45', # was default 0.2 — harder to trigger loop closure
+                'RGBD/ProximityPathMaxNeighbors': '10',
+                'RGBD/ProximityMaxGraphDepth': '0',
+                'RGBD/ProximityMaxPaths': '3',
+                'Mem/STMSize': '30',             # short-term memory size — recent nodes not candidates
+                'Rtabmap/LoopThr': '0.15',      # default is 0.11 — higher = less sensitive
+                'Rtabmap/LoopRatio': '0.9',     # require 90% of best score to confirm loop
+                'Reg/Strategy': '2',            # 2 = Visual + ICP combined, ICP has final say
+                'Kp/MaxFeatures': '-1',  
+                
+            }],
+            remappings=remappings,
+            arguments=['-d', LaunchConfiguration("args"), "--delete_db_on_start", ]),
+    ])

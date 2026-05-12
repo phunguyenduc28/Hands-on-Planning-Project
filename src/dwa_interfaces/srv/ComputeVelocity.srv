@@ -1,0 +1,6 @@
+float64 goal_x
+float64 goal_y
+---
+float64 linear_x
+float64 angular_z
+bool success
