@@ -1,5 +1,3 @@
-import os
-from glob import glob
 from setuptools import find_packages, setup
 
 package_name = 'online_motion_planning'
@@ -12,14 +10,13 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*launch.[pxy][yma]*'))), # To be able to find other launch file
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='root',
-    maintainer_email='root@todo.todo',
+    maintainer='huy',
+    maintainer_email='dohuy9379@gmail.com',
     description='TODO: Package description',
-    license='Apache-2.0',
+    license='TODO: License declaration',
     extras_require={
         'test': [
             'pytest',
@@ -27,9 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-                'control_tb = online_motion_planning.control_tb:main',
-                'rrt_tb = online_motion_planning.rrt_tb:main',
-                'frontier_rrt_tb = online_motion_planning.frontier_rrt_tb:main'
+            'control_tb = online_motion_planning.control_tb:main',
+            'occupancy_grid_original = online_motion_planning.occupancy_grid_original:main',
         ],
     },
 )

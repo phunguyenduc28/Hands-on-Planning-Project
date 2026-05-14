@@ -20,6 +20,12 @@ def generate_launch_description():
     declare_window_res_x = DeclareLaunchArgument('window_resolution_x', default_value='1200')
     declare_window_res_y = DeclareLaunchArgument('window_resolution_y', default_value='800')
     declare_quality = DeclareLaunchArgument('rendering_quality', default_value='high')
+    
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    declare_use_sim_time_cmd = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='Use simulation (Stonefish) clock if true')
 
     # 3. Process Xacro
     robot_description_content = Command([
@@ -58,7 +64,7 @@ def generate_launch_description():
             executable='robot_state_publisher',
             name='robot_state_publisher',
             output='screen',
-            parameters=[robot_description]
+            parameters=[robot_description, {'use_sim_time': use_sim_time}]
         ),
 
         # Passive Joints Group
@@ -72,7 +78,7 @@ def generate_launch_description():
                 parameters=[{
                     'joint2_name': PathJoinSubstitution([LaunchConfiguration('robot_name'), 'swiftpro', 'joint2']),
                     'joint3_name': PathJoinSubstitution([LaunchConfiguration('robot_name'), 'swiftpro', 'joint3'])
-                }],
+                }, {'use_sim_time': use_sim_time}],
                 remappings=[
                     ('joint_states', PathJoinSubstitution(['/', LaunchConfiguration('robot_name'), 'joint_states'])),
                     ('command', PathJoinSubstitution(['/', LaunchConfiguration('robot_name'), 'stonefish_simulator', 'swiftpro', 'passive_joint_position_controller', 'command']))
@@ -113,6 +119,7 @@ def generate_launch_description():
             package='turtlebot_simulation',
             executable='diff_drive_controller.py',
             name='diff_drive_controller',
+            parameters=[{'use_sim_time': use_sim_time}],
             output='screen'
         ),
 
@@ -121,14 +128,16 @@ def generate_launch_description():
             package='tf2_ros',
             executable='static_transform_publisher',
             name='enu_to_ned_broadcaster',
-            arguments=['0.0', '0.0', '0.0', str(math.pi/2), '0.0', str(math.pi), 'world_enu', 'world_ned']
+            arguments=['0.0', '0.0', '0.0', str(math.pi/2), '0.0', str(math.pi), 'world_enu', 'world_ned'],
+            parameters=[{'use_sim_time': use_sim_time}],
         ),
 
         Node(
             package='rviz2',
             executable='rviz2',
             name='rviz2',
-            arguments=['-d', PathJoinSubstitution([pkg_turtlebot_desc, 'rviz', 'turtlebot_rrt_costmap.rviz'])]
+            arguments=['-d', PathJoinSubstitution([pkg_turtlebot_desc, 'rviz', 'turtlebot_rrt_costmap.rviz'])],
+            parameters=[{'use_sim_time': use_sim_time}],
         )
     ])
 
@@ -140,6 +149,7 @@ def generate_launch_description():
         declare_window_res_x,
         declare_window_res_y,
         declare_quality,
+        declare_use_sim_time_cmd,
         robot_namespace_group
     ])
 
