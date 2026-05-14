@@ -144,8 +144,8 @@ class OccupancyGridNode(Node):
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('laser_frame', 'turtlebot/rplidar')
         self.declare_parameter('p_occ', 0.9)
-        self.declare_parameter('inflation_radius', 0.20)
-        self.declare_parameter('clear_on_max_range', False)
+        self.declare_parameter('inflation_radius', 0.18)
+        self.declare_parameter('clear_on_max_range', True)
         
         grid_size             = self.get_parameter('grid_size').value
         self.grid_resolution  = self.get_parameter('grid_resolution').value
@@ -173,7 +173,7 @@ class OccupancyGridNode(Node):
         self.map_pub          = self.create_publisher(OccupancyGrid, '/map',          10)
         self.inflated_map_pub = self.create_publisher(OccupancyGrid, '/inflated_map', 10)
         
-        self.timer = self.create_timer(1, self.timer_callback)
+        self.timer = self.create_timer(0.1, self.timer_callback)
 
     def quaternion_to_yaw(self, qx, qy, qz, qw):
         t3 = 2.0 * (qw * qz + qx * qy)
