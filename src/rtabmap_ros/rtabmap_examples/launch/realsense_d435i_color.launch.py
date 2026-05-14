@@ -228,7 +228,7 @@ def generate_launch_description():
                 'RGBD/LinearUpdate': '0.01',           # Update map for small movements
                 'RGBD/OptimizeFromGraphEnd': 'false',  # Standard SLAM optimization
                 # 'Vis/MinInliers': '10',                # Minimum features for a valid transformat ion
-                'Vis/MinInliers': '20',          # was 10 — require more feature matches before accepting
+                'Vis/MinInliers': '30',          # was 10 — require more feature matches before accepting
                 'Vis/InlierDistance': '0.05',    # tighter inlier threshold
                 'Mem/RehearsalSimilarity': '0.45', # was default 0.2 — harder to trigger loop closure
                 'RGBD/ProximityPathMaxNeighbors': '10',
@@ -238,16 +238,16 @@ def generate_launch_description():
                 'Rtabmap/LoopThr': '0.15',      # default is 0.11 — higher = less sensitive
                 'Rtabmap/LoopRatio': '0.9',     # require 90% of best score to confirm loop
                 'Reg/Strategy': '2',            # 2 = Visual + ICP combined, ICP has final say
-                'Kp/MaxFeatures': '-1',  
+                # 'Kp/MaxFeatures': '-1',  
                 
             }],
             remappings=remappings,
             arguments=['-d', LaunchConfiguration("args"), "--delete_db_on_start", ]),
 
-        # Node(
-        #     package='rtabmap_viz', executable='rtabmap_viz', output='screen',
-        #     parameters=parameters,
-        #     remappings=remappings),
+        Node(
+            package='rtabmap_viz', executable='rtabmap_viz', output='screen',
+            parameters=parameters,
+            remappings=remappings),
 
         # # Compute quaternion of the IMU
         # Node(
