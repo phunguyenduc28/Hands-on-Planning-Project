@@ -91,6 +91,16 @@ class PathPlannerNode(Node):
         self.max_retry_same_goal = 3
         self.max_iterations_increment = 2000
 
+        # ── Consecutive frontier rejection tracking ───────────────────────────
+        self.declare_parameter('max_consecutive_rejections', 6)
+        self.max_consecutive_rejections = self.get_parameter(
+            'max_consecutive_rejections').value
+        self.declare_parameter('goal_timeout_sec', 30.0)
+        self.goal_timeout_sec = self.get_parameter('goal_timeout_sec').value
+        self.consecutive_rejections = 0
+        self.exploration_done = False
+        self._last_trigger_time = None
+
         self.delta_q = 4
         self.p = 0.3
         self.max_depth = round(math.log(self.delta_q, 2)) + 1
@@ -146,6 +156,7 @@ class PathPlannerNode(Node):
         # ── Timers ───────────────────────────────────────────────────────────
         self.control_timer = self.create_timer(0.1, self.control_loop)   # 10 Hz
         self.path_timer = self.create_timer(1.0, self.path_planning_loop)  # 1 Hz
+        self.create_timer(1.0, self._timeout_check)                        # 1 Hz
 
         self.get_logger().info('Path planner node started')
 
@@ -358,9 +369,79 @@ class PathPlannerNode(Node):
         msg.pose.orientation.w = 1.0
         self.goal_reached_pub.publish(msg)
 
+    def _reject_goal(self, reason: str):
+        """Blacklist the current goal and request the next best frontier.
+
+        Publishes the failed goal to /frontier/goal_reached so frontier_node
+        suppresses it within visited_frontier_radius_m, then triggers a new
+        explicit search.  Increments the consecutive rejection counter; when
+        the limit is reached, transitions to 'spinning_360' (final scan) and
+        sets exploration_done.
+        """
+        if self.goal_pose is not None:
+            gx, gy = self.goal_pose
+            self.get_logger().warn(
+                f'Rejecting goal ({gx:.2f},{gy:.2f}) — {reason}')
+            self._notify_goal_reached(gx, gy)   # blacklist in frontier_node
+
+        self.goal_pose = None
+        self.waypoints = None
+        self.complete_a_path = True
+        self.rrt_fail_count = 0
+        self.max_iterations = self.max_iterations_base
+        self._dwa_future = None
+        self.cmd_vel_pub.publish(Twist())
+
+        self.consecutive_rejections += 1
+        if self.consecutive_rejections >= self.max_consecutive_rejections:
+            self.get_logger().info(
+                f'{self.consecutive_rejections} consecutive rejections — '
+                'no valid frontier found above area threshold')
+            self.exploration_done = True
+            self.rotation_state = 'spinning_360'
+            self.prev_yaw_for_spin = None
+            self.spin_accumulated = 0.0
+            return
+
+        self.get_logger().info(
+            f'Requesting next frontier '
+            f'(rejection {self.consecutive_rejections}/'
+            f'{self.max_consecutive_rejections})')
+        self._last_trigger_time = self.get_clock().now()
+        self._trigger_frontier_search()
+
+    def _timeout_check(self):
+        """Transition to spinning_360 if no frontier goal arrives after timeout.
+
+        Fires when frontier_node cannot find any cluster above the minimum area
+        threshold and simply stops publishing new goals.
+        """
+        if self.exploration_done or self._last_trigger_time is None:
+            return
+        if self.goal_pose is not None:
+            self._last_trigger_time = None   # goal arrived — cancel timeout
+            return
+        elapsed = (self.get_clock().now()
+                   - self._last_trigger_time).nanoseconds / 1e9
+        if elapsed > self.goal_timeout_sec:
+            self.get_logger().info(
+                f'No frontier goal in {elapsed:.1f} s — '
+                'all remaining frontiers below area threshold, '
+                'starting final 360° spin')
+            self.exploration_done = True
+            self._last_trigger_time = None
+            self.goal_pose = None
+            self.waypoints = None
+            self.cmd_vel_pub.publish(Twist())
+            self.rotation_state = 'spinning_360'
+            self.prev_yaw_for_spin = None
+            self.spin_accumulated = 0.0
+
     # ── Path planning loop (1 Hz) ─────────────────────────────────────────────
 
     def path_planning_loop(self):
+        if self.exploration_done:
+            return
         if self.rotation_state in ('spinning_360', 'halted'):
             return
         if self.binary_map is None or self.robot_pose is None:
@@ -416,10 +497,7 @@ class PathPlannerNode(Node):
             self.get_logger().warn('Start pose outside map bounds')
             return
         if not (0 <= q_goal[0] < map_w and 0 <= q_goal[1] < map_h):
-            self.get_logger().warn(
-                'Goal pose outside map bounds — requesting new frontier')
-            self.goal_pose = None
-            self._trigger_frontier_search()
+            self._reject_goal('goal outside map bounds')
             return
 
         rrt_star = BIRRT_STAR(
@@ -441,11 +519,7 @@ class PathPlannerNode(Node):
             q_start_point = PointRRT(q_start[0], q_start[1])
 
         if rrt_star.is_point_occupied(q_goal_point, self.binary_map):
-            self.get_logger().warn(
-                'Goal on obstacle — requesting new frontier')
-            self.goal_pose = None
-            self.waypoints = None
-            self._trigger_frontier_search()
+            self._reject_goal('goal on obstacle')
             return
 
         # ── Collision-check existing path ────────────────────────────────────
@@ -504,13 +578,8 @@ class PathPlannerNode(Node):
                     f'retrying with {self.max_iterations} iterations')
                 self.waypoints = None
             else:
-                self.get_logger().warn(
-                    'BiRRT* failed after max retries — requesting new frontier')
-                self.rrt_fail_count = 0
-                self.max_iterations = self.max_iterations_base
-                self.goal_pose = None
-                self.waypoints = None
-                self._trigger_frontier_search()
+                self._reject_goal(
+                    f'BiRRT* failed after {self.max_retry_same_goal} attempts')
         else:
             # Planning succeeded
             self.rrt_fail_count = 0
@@ -661,6 +730,7 @@ class PathPlannerNode(Node):
                     if reached_goal is not None:
                         self._notify_goal_reached(
                             reached_goal[0], reached_goal[1])
+                    self.consecutive_rejections = 0   # success resets counter
                     self.get_logger().info('All waypoints reached')
                     self.rotation_state = 'idle'
                 return

@@ -105,13 +105,13 @@ def generate_launch_description():
 
     # ── DWA service ────────────────────────────────────────────────────────
     # Provides /dwa/compute_velocity; uses /inflated_map_dwa.
-    dwa_service_node = Node(
-        package='dwa_planner',
-        executable='dwa_service',
-        name='dwa_service_node',    # matches YAML section 'dwa_service_node'
-        output='screen',
-        parameters=[params_file]
-    )
+    # dwa_service_node = Node(
+    #     package='dwa_planner',
+    #     executable='dwa_service',
+    #     name='dwa_service_node',    # matches YAML section 'dwa_service_node'
+    #     output='screen',
+    #     parameters=[params_file]
+    # )
 
     # ── Frontier detection node ────────────────────────────────────────────
     frontier_node = Node(
@@ -156,7 +156,7 @@ def generate_launch_description():
         actions=[
             global_costmap_node,
             dwa_local_costmap_node,
-            dwa_service_node,
+            # dwa_service_node,
             frontier_node,
             path_planner_node,
         ]

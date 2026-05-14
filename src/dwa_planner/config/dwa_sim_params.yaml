@@ -1,0 +1,27 @@
+# dwa_test_params.yaml
+# Parameters for standalone DWA testing (dwa_test.launch.py).
+# Adjust map_frame / laser_frame for simulation vs real robot:
+#   real robot:  map_frame: odom,      laser_frame: rplidar
+#   simulation:  map_frame: world_enu, laser_frame: turtlebot/rplidar
+
+# ── DWA local costmap ────────────────────────────────────────────────────────
+dwa_local_costmap:
+  ros__parameters:
+    map_frame: world_enu
+    laser_frame: turtlebot/rplidar
+    grid_size: 5.0
+    grid_resolution: 0.05
+    inflation_radius: 0.2
+
+# ── DWA service ──────────────────────────────────────────────────────────────
+dwa_service_node:
+  ros__parameters:
+    inflated_map_topic: /inflated_map_dwa
+    vel_deadzone_linear: 0.0
+    vel_deadzone_angular: 0.0
+
+# ── DWA goal driver ──────────────────────────────────────────────────────────
+dwa_goal_node:
+  ros__parameters:
+    acceptance_radius: 0.15
+    map_frame: world_enu

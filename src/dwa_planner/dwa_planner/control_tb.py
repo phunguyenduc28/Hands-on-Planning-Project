@@ -34,18 +34,18 @@ class DWAServiceNode(Node):
         self.grid_map = None
 
         # ── DWA kinematic limits ─────────────────────────────────────────────
-        self.max_speed = 0.35
+        self.max_speed = 0.4
         self.max_yaw_rate = 1.8
-        self.max_accel = 0.8
+        self.max_accel = 0.2
         self.max_delta_yaw = 1.2
         self.dt = 0.1
-        self.predict_time = 2.5
+        self.predict_time = 5.0
         self.viz_time = 4.0
 
         # ── Cost weights ─────────────────────────────────────────────────────
         self.heading_w = 8.0
         self.dist_w = 6.0
-        self.obstacle_w = 8.0
+        self.obstacle_w = 50.0
         self.velocity_w = 0.5
 
         # ── Parameters ───────────────────────────────────────────────────────
@@ -181,21 +181,24 @@ class DWAServiceNode(Node):
             for w in np.arange(w_min, w_max + 0.01, 0.06):
                 traj = self._simulate(v, w, horizon)
                 obs = self._obstacle_cost(traj)
-                if obs == float('inf'):
-                    continue
-                lx, ly, lyaw = traj[-1]
-                ga = math.atan2(goal_y - ly, goal_x - lx)
-                heading_err = abs(math.atan2(
-                    math.sin(ga - lyaw), math.cos(ga - lyaw)))
-                dist = math.hypot(goal_x - lx, goal_y - ly)
-                cost = (self.heading_w * heading_err +
-                        self.dist_w * dist +
-                        self.obstacle_w * obs +
-                        self.velocity_w * (self.max_speed - v))
-                all_paths.append({'v': v, 'w': w, 'traj': traj, 'cost': cost})
-                if cost < best_cost:
-                    best_cost = cost
-                    best_v, best_w = v, w
+                feasible = obs != float('inf')
+                if feasible:
+                    lx, ly, lyaw = traj[-1]
+                    ga = math.atan2(goal_y - ly, goal_x - lx)
+                    heading_err = abs(math.atan2(
+                        math.sin(ga - lyaw), math.cos(ga - lyaw)))
+                    dist = math.hypot(goal_x - lx, goal_y - ly)
+                    cost = (self.heading_w * heading_err +
+                            self.dist_w * dist +
+                            self.obstacle_w * obs +
+                            self.velocity_w * (self.max_speed - v))
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_v, best_w = v, w
+                else:
+                    cost = float('inf')
+                all_paths.append({'v': v, 'w': w, 'traj': traj,
+                                  'cost': cost, 'feasible': feasible})
 
         return best_v, best_w, all_paths
 
@@ -209,10 +212,28 @@ class DWAServiceNode(Node):
         frame = self.grid_map.header.frame_id
         lifetime = rclpy.duration.Duration(seconds=0.3).to_msg()
 
+        # Clear stale markers from the previous cycle
+        delete_all = Marker()
+        delete_all.action = Marker.DELETEALL
+        marker_array.markers.append(delete_all)
+
+        # Split into feasible non-best candidates vs obstacle-hitting (infeasible)
+        feasible = [p for p in paths
+                    if p['feasible']
+                    and not (abs(p['v'] - bv) < 1e-3 and abs(p['w'] - bw) < 1e-3)]
+        infeasible = [p for p in paths if not p['feasible']]
+
+        # Cost range for color mapping among feasible candidates
+        if feasible:
+            cost_min = min(p['cost'] for p in feasible)
+            cost_range = max(max(p['cost'] for p in feasible) - cost_min, 1e-6)
+        else:
+            cost_min, cost_range = 0.0, 1.0
+
         cid = 0
-        for p in paths[::3]:
-            if abs(p['v'] - bv) < 1e-3 and abs(p['w'] - bw) < 1e-3:
-                continue
+
+        # Infeasible (obstacle-hitting) arcs — faint red, bottom layer
+        for p in infeasible:
             m = Marker()
             m.header.frame_id = frame
             m.header.stamp = now
@@ -220,20 +241,43 @@ class DWAServiceNode(Node):
             m.id = cid
             m.type = Marker.LINE_STRIP
             m.action = Marker.ADD
-            m.scale.x = 0.02
-            m.color = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.35)
+            m.scale.x = 0.012
+            m.color = ColorRGBA(r=0.8, g=0.0, b=0.0, a=0.20)
             m.pose.orientation.w = 1.0
             m.lifetime = lifetime
             for x, y, _ in self._simulate(p['v'], p['w'], self.viz_time):
                 pt = Point()
                 pt.x = float(x)
                 pt.y = float(y)
-                pt.z = 0.05
+                pt.z = 0.01
                 m.points.append(pt)
             marker_array.markers.append(m)
             cid += 1
 
-        # Best trajectory drawn last so it renders on top
+        # Feasible candidates — blue (t=0, near-best) → red (t=1, worst)
+        for p in feasible:
+            t = float((p['cost'] - cost_min) / cost_range)
+            m = Marker()
+            m.header.frame_id = frame
+            m.header.stamp = now
+            m.ns = 'dwa_candidates'
+            m.id = cid
+            m.type = Marker.LINE_STRIP
+            m.action = Marker.ADD
+            m.scale.x = 0.012
+            m.color = ColorRGBA(r=t, g=0.0, b=1.0 - t, a=0.55)
+            m.pose.orientation.w = 1.0
+            m.lifetime = lifetime
+            for x, y, _ in self._simulate(p['v'], p['w'], self.viz_time):
+                pt = Point()
+                pt.x = float(x)
+                pt.y = float(y)
+                pt.z = 0.03
+                m.points.append(pt)
+            marker_array.markers.append(m)
+            cid += 1
+
+        # Best trajectory — yellow, thick, on top
         m = Marker()
         m.header.frame_id = frame
         m.header.stamp = now
@@ -241,7 +285,7 @@ class DWAServiceNode(Node):
         m.id = 0
         m.type = Marker.LINE_STRIP
         m.action = Marker.ADD
-        m.scale.x = 0.10
+        m.scale.x = 0.020
         m.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
         m.pose.orientation.w = 1.0
         m.lifetime = lifetime
@@ -249,7 +293,7 @@ class DWAServiceNode(Node):
             pt = Point()
             pt.x = float(x)
             pt.y = float(y)
-            pt.z = 0.30
+            pt.z = 0.10
             m.points.append(pt)
         marker_array.markers.append(m)
         self.marker_pub.publish(marker_array)

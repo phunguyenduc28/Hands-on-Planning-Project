@@ -68,11 +68,21 @@ path_planner_tb:
   ros__parameters:
     map_frame: world_enu
     is_sim: true
-    # Waypoint acceptance radius (m): robot considers a waypoint reached when
-    # it is within this distance.
     acceptance_radius: 0.1
-    # Distance the robot must travel (m) before doing a new 360° scan.
     scan_distance_threshold: 0.4
-    # Maximum BiRRT* iterations per planning call.
-    # Increase if the planner often fails in cluttered environments.
     max_iterations: 4000
+    max_consecutive_rejections: 6
+    goal_timeout_sec: 30.0
+
+# ── Path planner / BiRRT* — no-spin variant ──────────────────────────────────
+path_planner_no_spin:
+  ros__parameters:
+    map_frame: world_enu
+    is_sim: true
+    acceptance_radius: 0.1
+    max_iterations: 4000
+    # Reject this many consecutive goals before declaring exploration complete.
+    max_consecutive_rejections: 6
+    # Seconds to wait for a new frontier goal after triggering a search;
+    # timeout means no frontiers remain above the area threshold.
+    goal_timeout_sec: 30.0

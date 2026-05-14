@@ -30,8 +30,8 @@ dwa_service_node:
     inflated_map_topic: /inflated_map_dwa
     # Real robot dead zone: commands below these thresholds are ignored by
     # the motor controllers and the robot does not move.
-    vel_deadzone_linear: 0.3
-    vel_deadzone_angular: 0.5
+    vel_deadzone_linear: 0.1
+    vel_deadzone_angular: 0.3
 
 # ── Frontier detection (online_motion_planning) ──────────────────────────────
 frontier_node:
@@ -50,3 +50,15 @@ path_planner_tb:
     acceptance_radius: 0.15
     scan_distance_threshold: 0.4
     max_iterations: 4000
+    max_consecutive_rejections: 6
+    goal_timeout_sec: 30.0
+
+# ── Path planner / BiRRT* — no-spin variant ──────────────────────────────────
+path_planner_no_spin:
+  ros__parameters:
+    map_frame: odom
+    is_sim: false
+    acceptance_radius: 0.15
+    max_iterations: 4000
+    max_consecutive_rejections: 6
+    goal_timeout_sec: 30.0

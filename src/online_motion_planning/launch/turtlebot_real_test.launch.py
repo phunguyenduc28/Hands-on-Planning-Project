@@ -43,13 +43,13 @@ def generate_launch_description():
     # ── DWA service ────────────────────────────────────────────────────────
     # Provides /dwa/compute_velocity.  Dead zone compensation active:
     # linear >= 0.3 m/s, angular >= 0.5 rad/s for any non-zero command.
-    dwa_service_node = Node(
-        package='dwa_planner',
-        executable='dwa_service',
-        name='dwa_service_node',    # matches YAML section 'dwa_service_node'
-        output='screen',
-        parameters=[params_file]
-    )
+    # dwa_service_node = Node(
+    #     package='dwa_planner',
+    #     executable='dwa_service',
+    #     name='dwa_service_node',    # matches YAML section 'dwa_service_node'
+    #     output='screen',
+    #     parameters=[params_file]
+    # )
 
     # ── Frontier detection ─────────────────────────────────────────────────
     frontier_node = Node(
@@ -75,7 +75,7 @@ def generate_launch_description():
         executable='rviz2',
         name='rviz2',
         arguments=['-d', PathJoinSubstitution(
-            [pkg_turtlebot_desc, 'rviz', 'turtlebot_frontier_rrt_costmap.rviz'])]
+            [pkg_turtlebot_desc, 'rviz', 'turtlebot_frontier_rrt_costmap_real_robot.rviz'])]
     )
 
     # ── Timing ────────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ def generate_launch_description():
         actions=[
             global_costmap_node,
             dwa_local_costmap_node,
-            dwa_service_node,
+            # dwa_service_node,
             frontier_node,
             path_planner_node,
             rviz_node,

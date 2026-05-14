@@ -163,4 +163,8 @@ def generate_launch_description():
             }],
             remappings=remappings,
             arguments=['-d', LaunchConfiguration("args"), "--delete_db_on_start", ]),
+        Node(
+            package='rtabmap_viz', executable='rtabmap_viz', output='screen',
+            parameters=parameters,
+            remappings=remappings),
     ])
