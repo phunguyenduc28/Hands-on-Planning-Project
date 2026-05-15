@@ -24,7 +24,7 @@ class DWATurtlebot(Node):
         self.max_speed     = 0.26   # TurtleBot3 max linear speed (m/s)
         self.max_yaw_rate  = 1.8    # TurtleBot3 max angular speed (rad/s)
         self.max_accel     = 0.8
-        self.max_delta_yaw = 1.2
+        self.max_delta_yaw = 2.2
         self.dt            = 0.1
         self.predict_time  = 5.0
 
@@ -145,18 +145,13 @@ class DWATurtlebot(Node):
             if val >= 100:
                 return float('inf'), 100
 
-            # Scale soft costs much more aggressively than before.
-            # In an inflated map, cells 1..50 mean "near obstacle".
-            # Treat them with quadratic falloff so trajectories grazing
-            # obstacles get punished significantly.
-            # val=50 is unobserved space — with clear_on_max_range=True, any cell
-            # the LIDAR ray passes through is explicitly cleared to 0, so val=50
-            # means genuinely unseen (behind a wall).  Penalising it at 1.0/step
-            # was blocking every trajectory that entered open-but-unscanned space.
-            # Only penalise cells that are actually in the inflation soft zone (1-49).
-            # if 0 < val < 50:
-            #     normalized = val / 50.0
-            #     penalty += normalized
+            # Gradient inflation (occupancy_grid_original) now produces values 1–99
+            # near obstacles (99 = just outside wall, 1 = at inflation boundary).
+            # Penalise the full range so DWA steers away from walls smoothly
+            # instead of hard-blocking at a binary step.
+            if 0 < val < 100:
+                normalized = val / 100.0
+                penalty += normalized
 
             if val is not None and val > max_val_seen:
                 max_val_seen = val
@@ -253,9 +248,10 @@ class DWATurtlebot(Node):
                 dist      = math.hypot(self.goal_pose.x - lx, self.goal_pose.y - ly)
                 dist_norm = dist / init_dist
 
-                # max_val is 0 (all free) or 50 (grazed unknown space).
-                # val=100 already causes inf rejection so it never reaches here.
-                # Normalise against 100 so val=50 → 0.5 penalty.
+                # With gradient inflation, max_val is 0 (all free) to 99 (grazed
+                # the cell just outside the obstacle hard boundary). Normalise so
+                # clearance_cost = 0 for clear paths and up to 0.99 for paths that
+                # graze near walls — scaled by clearance_cost_weight in the total.
                 clearance_cost = max_val / 100.0
                 velocity_cost  = (self.max_speed - v) / self.max_speed
 
@@ -296,8 +292,13 @@ class DWATurtlebot(Node):
                 f"[DWA]   v={vk:.3f}: valid={per_v_valid[vk]}"
                 f"  rejected={per_v_rejected[vk]}  [{status}]"
             )
+            
+        # all_fwd_blocked = all(
+            #     per_v_valid.get(round(v, 3), 0) == 0
+            #     for v in v_samples if v > 0.001
+            # )
         
-        if best_cost == float('inf'):
+        if best_cost == float('inf') or status == "BLOCKED":
             self.get_logger().warn(
                 f"[DWA] ALL {n_total} trajectories rejected — rotating to escape."
                 f"  dist={init_dist:.2f}m  yaw={math.degrees(self.current_yaw):.1f}°"

@@ -105,33 +105,48 @@ class GridMap:
 
     def get_inflated_grid(self, inflation_radius_m):
         grid_data = self.get_occupancy_grid_array()
-        
+
         radius_cells = int(math.ceil(inflation_radius_m / self.cell_size))
         if radius_cells <= 0:
             return grid_data
 
-        y, x = np.ogrid[-radius_cells:radius_cells+1, -radius_cells:radius_cells+1]
-        mask = x**2 + y**2 <= radius_cells**2
-        
-        inflated_grid = grid_data.copy()
+        # Gradient inflation: actual obstacle stays at 100 (hard reject).
+        # Cells within the inflation radius get a cost that decreases linearly
+        # from 99 (just outside the obstacle) to 1 (at the inflation boundary).
+        # This gives DWA a smooth repulsion field — trajectories close to walls
+        # are penalised but not hard-rejected, so the robot can navigate narrow
+        # corridors instead of freezing when it brushes the inflation zone.
+        inflated_grid = grid_data.copy().astype(np.int16)
         rows, cols = np.where(grid_data == 100)
 
-        for r, c in zip(rows, cols):
-            r_start = max(0, r - radius_cells)
-            r_end = min(self.height, r + radius_cells + 1)
-            c_start = max(0, c - radius_cells)
-            c_end = min(self.width, c + radius_cells + 1)
-            
-            m_r_start = radius_cells - (r - r_start)
-            m_r_end = m_r_start + (r_end - r_start)
-            m_c_start = radius_cells - (c - c_start)
-            m_c_end = m_c_start + (c_end - c_start)
-            
-            mask_slice = mask[m_r_start:m_r_end, m_c_start:m_c_end]
-            region = inflated_grid[r_start:r_end, c_start:c_end]
-            region[mask_slice] = 100
-            
-        return inflated_grid.astype(np.int8)
+        if len(rows) == 0:
+            return inflated_grid.astype(np.int8)
+
+        # Iterate outer → inner so that inner (higher cost) rings overwrite
+        # outer (lower cost) rings for cells shared between disks.
+        for d in range(radius_cells, 0, -1):
+            cost = max(1, round(99 * (1.0 - float(d) / radius_cells)))
+
+            y, x = np.ogrid[-d:d + 1, -d:d + 1]
+            mask = x**2 + y**2 <= d**2
+
+            for r, c in zip(rows, cols):
+                r_start = max(0, r - d)
+                r_end   = min(self.height, r + d + 1)
+                c_start = max(0, c - d)
+                c_end   = min(self.width,  c + d + 1)
+
+                m_r_start = d - (r - r_start)
+                m_r_end   = m_r_start + (r_end - r_start)
+                m_c_start = d - (c - c_start)
+                m_c_end   = m_c_start + (c_end - c_start)
+
+                slc    = mask[m_r_start:m_r_end, m_c_start:m_c_end]
+                region = inflated_grid[r_start:r_end, c_start:c_end]
+                # Only raise cells — never downgrade actual obstacles (100).
+                region[slc & (region < cost)] = cost
+
+        return np.clip(inflated_grid, -128, 127).astype(np.int8)
 
 
 class OccupancyGridNode(Node):
@@ -162,7 +177,8 @@ class OccupancyGridNode(Node):
         self.robot_x     = 0.0
         self.robot_y     = 0.0
         self.robot_theta = 0.0
-        self.latest_scan = None  
+        self.latest_scan = None
+        self.tf_ok       = False   # True only when TF is fresh and valid
         
         self.tf_buffer   = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=30))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -173,7 +189,7 @@ class OccupancyGridNode(Node):
         self.map_pub          = self.create_publisher(OccupancyGrid, '/map',          10)
         self.inflated_map_pub = self.create_publisher(OccupancyGrid, '/inflated_map', 10)
         
-        self.timer = self.create_timer(0.1, self.timer_callback)
+        self.timer = self.create_timer(0.2, self.timer_callback)  # 5 Hz
 
     def quaternion_to_yaw(self, qx, qy, qz, qw):
         t3 = 2.0 * (qw * qz + qx * qy)
@@ -187,36 +203,61 @@ class OccupancyGridNode(Node):
         self.robot_theta = self.quaternion_to_yaw(q.x, q.y, q.z, q.w)
 
     def scan_callback(self, msg):
-        self.latest_scan = msg  
+        # Store only — do NOT process here.
+        # Processing (grid clear + ray tracing + gradient inflation) is slow in
+        # Python.  If we process in scan_callback the executor queues up multiple
+        # scans and falls further behind each cycle, causing 1-2 s stale scans.
+        # The timer_callback processes the latest stored scan at a fixed rate and
+        # discards anything older than 200 ms.
+        self.latest_scan = msg
 
     def timer_callback(self):
-        # Make map LOCAL (follow robot)
+        if self.latest_scan is None:
+            return
+
+        scan_age_ms = (
+            self.get_clock().now() -
+            rclpy.time.Time.from_msg(self.latest_scan.header.stamp)
+        ).nanoseconds / 1e6
+
+        if scan_age_ms > 200.0:
+            self.get_logger().warn(
+                f'[MAP] Discarding scan that is {scan_age_ms:.0f}ms old — '
+                f'gradient inflation is too slow for this rate. '
+                f'Consider reducing inflation_radius or grid_size.'
+            )
+            self.latest_scan = None
+            return
+
         self.grid_map.origin = np.array([
             self.robot_x - self.grid_size / 2,
             self.robot_y - self.grid_size / 2
         ])
-
-        # Clear old memory (pure local map)
         self.grid_map.grid.fill(0.0)
-
-        # always use latest_scan, no flag check
-        if self.latest_scan is not None:
-            self.update_grid_from_scan(self.latest_scan)
-
+        self.update_grid_from_scan(self.latest_scan)
         self.publish_occupancy_grid()
+        self.latest_scan = None
 
     def update_grid_from_scan(self, scan_msg):
         try:
             scan_time = rclpy.time.Time.from_msg(scan_msg.header.stamp)
+            now_time  = self.get_clock().now()
+            scan_age_ms = (now_time - scan_time).nanoseconds / 1e6
 
+            tf_source = 'scan_timestamp'
             try:
                 transform = self.tf_buffer.lookup_transform(
                     self.map_frame,
                     self.laser_frame,
                     scan_time,
-                    timeout=rclpy.duration.Duration(seconds=0.5)
+                    timeout=rclpy.duration.Duration(seconds=0.5)  # was 0.5 — long block
                 )
-            except tf2_ros.TransformException:
+            except tf2_ros.TransformException as e:
+                tf_source = 'current_time_FALLBACK'
+                self.get_logger().warn(
+                    f'[MAP] TF at scan_time failed ({e}), falling back to current time.'
+                    f'  scan_age={scan_age_ms:.1f}ms'
+                )
                 transform = self.tf_buffer.lookup_transform(
                     self.map_frame,
                     self.laser_frame,
@@ -229,6 +270,21 @@ class OccupancyGridNode(Node):
 
             q = transform.transform.rotation
             laser_yaw = self.quaternion_to_yaw(q.x, q.y, q.z, q.w)
+
+            # Log any significant mismatch between TF position and odom position.
+            # A large delta means the map origin and scan projection are inconsistent,
+            # which causes the visual "snap" between frames.
+            odom_tf_dx = robot_x_map - self.robot_x
+            odom_tf_dy = robot_y_map - self.robot_y
+            odom_tf_dist = math.hypot(odom_tf_dx, odom_tf_dy)
+            if odom_tf_dist > 0.05:
+                self.get_logger().warn(
+                    f'[MAP] TF/odom mismatch: tf=({robot_x_map:.3f},{robot_y_map:.3f})'
+                    f'  odom=({self.robot_x:.3f},{self.robot_y:.3f})'
+                    f'  delta={odom_tf_dist:.3f}m'
+                    f'  tf_source={tf_source}'
+                    f'  scan_age={scan_age_ms:.1f}ms'
+                )
 
             min_range = 0.15
             max_range = 12.0

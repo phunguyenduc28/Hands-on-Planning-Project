@@ -1,6 +1,8 @@
 /build
 /install
 /log
+/src/rtabmap
+/src/rtabmap_ros
 # /src/kobuki_description
 # /src/octomap_rviz_plugins
 # /src/scan_to_cloud2
