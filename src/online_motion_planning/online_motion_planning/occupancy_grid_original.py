@@ -103,7 +103,7 @@ class GridMap:
     def get_origin(self):
         return self.origin
 
-    def get_inflated_grid(self, inflation_radius_m):
+    def get_inflated_grid(self, inflation_radius_m, cost_scaling_factor=1.0):
         grid_data = self.get_occupancy_grid_array()
 
         radius_cells = int(math.ceil(inflation_radius_m / self.cell_size))
@@ -125,7 +125,12 @@ class GridMap:
         # Iterate outer → inner so that inner (higher cost) rings overwrite
         # outer (lower cost) rings for cells shared between disks.
         for d in range(radius_cells, 0, -1):
-            cost = max(1, round(99 * (1.0 - float(d) / radius_cells)))
+            # cost_scaling_factor shapes the gradient curve:
+            #   1.0 → linear (default)
+            #   >1.0 → costs stay high further from wall (more aggressive repulsion)
+            #   <1.0 → costs drop quickly, gentle repulsion near boundary
+            linear = 1.0 - float(d) / radius_cells
+            cost = max(1, round(99 * (linear ** (1.0 / cost_scaling_factor))))
 
             y, x = np.ogrid[-d:d + 1, -d:d + 1]
             mask = x**2 + y**2 <= d**2
@@ -161,7 +166,13 @@ class OccupancyGridNode(Node):
         self.declare_parameter('p_occ', 0.9)
         self.declare_parameter('inflation_radius', 0.18)
         self.declare_parameter('clear_on_max_range', True)
-        
+        # cost_scaling_factor controls how aggressively the DWA is repelled from walls.
+        # cost = 99 * (1 - d/radius)^(1/factor)
+        #   factor=1.0 → linear (default)
+        #   factor>1.0 → costs stay HIGH further from the wall (more rejection)
+        #   factor<1.0 → costs drop quickly near wall, gentle at boundary
+        self.declare_parameter('cost_scaling_factor', 1.5)
+
         grid_size             = self.get_parameter('grid_size').value
         self.grid_resolution  = self.get_parameter('grid_resolution').value
         self.map_frame        = self.get_parameter('map_frame').value
@@ -169,7 +180,8 @@ class OccupancyGridNode(Node):
         self.laser_frame      = self.get_parameter('laser_frame').value
         self.p_occ            = self.get_parameter('p_occ').value
         self.inflation_radius = self.get_parameter('inflation_radius').value
-        self.clear_on_max_range = self.get_parameter('clear_on_max_range').value
+        self.clear_on_max_range    = self.get_parameter('clear_on_max_range').value
+        self.cost_scaling_factor   = self.get_parameter('cost_scaling_factor').value
 
         self.grid_map  = GridMap(center=[0.0, 0.0], cell_size=self.grid_resolution, map_size=grid_size)
         self.grid_size = grid_size
@@ -328,7 +340,7 @@ class OccupancyGridNode(Node):
 
     def publish_occupancy_grid(self):
         raw_data      = self.grid_map.get_occupancy_grid_array()
-        inflated_data = self.grid_map.get_inflated_grid(self.inflation_radius)
+        inflated_data = self.grid_map.get_inflated_grid(self.inflation_radius, self.cost_scaling_factor)
 
         now    = self.get_clock().now().to_msg()
         origin = self.grid_map.get_origin()
