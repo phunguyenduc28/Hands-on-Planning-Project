@@ -40,6 +40,13 @@ class DWATurtlebot(Node):
         self._last_cmd_v = 0.0
         self._last_cmd_w = 0.0
 
+        # Escape sweep state machine: 1=sweep-right, 2=return-center, 3=sweep-left
+        self._escape_phase      = 0
+        self._escape_ref_yaw    = None
+        self._in_escape_sweep   = False
+        self._escape_needs_check = False   # True at right/left limits — triggers a DWA check
+        self._SWEEP_ANGLE       = math.radians(75)
+
         self.cmd_vel_pub = self.create_publisher(Twist, '/turtlebot/cmd_vel', 10)
         self.marker_pub  = self.create_publisher(MarkerArray, '/dwa_trajectories', 10)
 
@@ -300,32 +307,10 @@ class DWATurtlebot(Node):
         
         if best_cost == float('inf') or status == "BLOCKED":
             self.get_logger().warn(
-                f"[DWA] ALL {n_total} trajectories rejected — rotating to escape."
+                f"[DWA] ALL {n_total} trajectories rejected — entering escape sweep."
                 f"  dist={init_dist:.2f}m  yaw={math.degrees(self.current_yaw):.1f}°"
             )
-            
-            # --- NEW LOGIC STARTS HERE ---
-            # 1. Calculate the angle to the goal
-            goal_angle = math.atan2(
-                self.goal_pose.y - self.robot_pose.y,
-                self.goal_pose.x - self.robot_pose.x
-            )
-            
-            # 2. Find the shortest difference between current yaw and goal angle
-            yaw_error = math.atan2(
-                math.sin(goal_angle - self.current_yaw),
-                math.cos(goal_angle - self.current_yaw)
-            )
-            
-            # 3. Rotate in the direction of the goal
-            best_v = 0.0
-            if yaw_error > 0:
-                best_w = self.max_yaw_rate * 0.6  # Rotate Left
-            else:
-                best_w = -self.max_yaw_rate * 0.6 # Rotate Right
-            # --- NEW LOGIC ENDS HERE ---
-
-            return best_v, best_w, all_paths, True   # forced=True
+            return 0.0, 0.0, all_paths, True   # forced=True — caller handles sweep
         else:
             bd = best_breakdown
             self.get_logger().info(
@@ -354,6 +339,76 @@ class DWATurtlebot(Node):
             #     return best_v, best_w, all_paths, True   # forced=True
 
         return best_v, best_w, all_paths, False
+
+    # ======================================================
+    # ESCAPE SWEEP
+    # ======================================================
+
+    def _escape_sweep_step(self):
+        """Execute one control tick of the right→center→left sweep."""
+        ROTATE_RATE = self.max_yaw_rate * 0.6
+        TOL = 0.08  # ~4.6° deadband
+
+        if self._escape_ref_yaw is None:
+            self._escape_ref_yaw = self.current_yaw
+            self._escape_phase   = 1
+            self.get_logger().warn(
+                f"[ESCAPE] Sweep started — ref={math.degrees(self._escape_ref_yaw):.1f}°"
+                f"  right_target={math.degrees(self._escape_ref_yaw - self._SWEEP_ANGLE):.1f}°"
+                f"  left_target={math.degrees(self._escape_ref_yaw + self._SWEEP_ANGLE):.1f}°"
+            )
+
+        ref = self._escape_ref_yaw
+        err = math.atan2(
+            math.sin(self.current_yaw - ref),
+            math.cos(self.current_yaw - ref)
+        )
+
+        if self._escape_phase == 1:        # sweep right (CW, w < 0)
+            if err <= -(self._SWEEP_ANGLE - TOL):
+                self._escape_phase       = 2
+                self._escape_needs_check = True
+                self.get_logger().warn(
+                    f"[ESCAPE] Phase 1: right limit reached at {math.degrees(self.current_yaw):.1f}°"
+                    f" — checking for path before returning to center"
+                )
+            else:
+                self.get_logger().info(
+                    f"[ESCAPE] Phase 1 (sweep RIGHT): err={math.degrees(err):.1f}°"
+                    f" / target={math.degrees(-self._SWEEP_ANGLE):.1f}°"
+                )
+            return 0.0, -ROTATE_RATE
+
+        elif self._escape_phase == 2:      # return to center (CCW, w > 0)
+            if abs(err) < TOL:
+                self._escape_phase = 3
+                self.get_logger().warn(
+                    f"[ESCAPE] Phase 2→3: center reached at {math.degrees(self.current_yaw):.1f}°"
+                    f" — sweeping left to {math.degrees(ref + self._SWEEP_ANGLE):.1f}°"
+                )
+            else:
+                self.get_logger().info(
+                    f"[ESCAPE] Phase 2 (return CENTER): err={math.degrees(err):.1f}°"
+                    f" / target=0.0°"
+                )
+            return 0.0, ROTATE_RATE
+
+        else:                              # sweep left (CCW, w > 0), phase 3
+            if err >= (self._SWEEP_ANGLE - TOL):
+                # Reset for the next sweep cycle in case this check also fails.
+                self._escape_phase       = 1
+                self._escape_ref_yaw     = self.current_yaw
+                self._escape_needs_check = True
+                self.get_logger().warn(
+                    f"[ESCAPE] Phase 3: left limit reached at {math.degrees(self.current_yaw):.1f}°"
+                    f" — checking for path before restarting sweep"
+                )
+            else:
+                self.get_logger().info(
+                    f"[ESCAPE] Phase 3 (sweep LEFT): err={math.degrees(err):.1f}°"
+                    f" / target={math.degrees(self._SWEEP_ANGLE):.1f}°"
+                )
+            return 0.0, ROTATE_RATE
 
     # ======================================================
     # VISUALIZATION
@@ -430,21 +485,51 @@ class DWATurtlebot(Node):
             self.goal_pose = None
             return
 
+        # During sweep: skip DWA except at right/left limits.
+        if self._in_escape_sweep:
+            if self._escape_needs_check:
+                self._escape_needs_check = False
+                dwa_v, dwa_w, paths, forced = self.compute_dwa()
+                if not forced:
+                    self.get_logger().warn("[ESCAPE] Path found at sweep limit — exiting escape mode")
+                    self._in_escape_sweep = False
+                    self._escape_phase    = 0
+                    self._escape_ref_yaw  = None
+                    self._last_cmd_v      = dwa_v
+                    self._last_cmd_w      = dwa_w
+                    cmd = Twist()
+                    cmd.linear.x  = float(dwa_v)
+                    cmd.angular.z = float(dwa_w)
+                    self.cmd_vel_pub.publish(cmd)
+                    self.publish_paths(paths, dwa_v, dwa_w)
+                else:
+                    self.get_logger().warn("[ESCAPE] Still blocked at sweep limit — continuing sweep")
+                    self.cmd_vel_pub.publish(Twist())
+                return
+
+            v, w = self._escape_sweep_step()
+            cmd = Twist()
+            cmd.linear.x  = float(v)
+            cmd.angular.z = float(w)
+            self.cmd_vel_pub.publish(cmd)
+            return
+
         v, w, paths, forced = self.compute_dwa()
 
-        cmd = Twist()
-        cmd.linear.x = float(v)
-        cmd.angular.z = float(w)
-
-        self.cmd_vel_pub.publish(cmd)
-
-        # Only update the window tracker from normal DWA choices.
-        # When the rotation is forced (wall escape), feeding w back in
-        # would lock the window at high angular velocity and cause the
-        # robot to circle instead of escaping cleanly.
-        if not forced:
+        if forced:
+            # First tick of a new blocked episode — enter sweep mode and start step 1.
+            self._in_escape_sweep = True
+            self._escape_ref_yaw  = None
+            v, w = self._escape_sweep_step()
+        else:
+            # Normal DWA choice — update window tracker.
             self._last_cmd_v = v
             self._last_cmd_w = w
+
+        cmd = Twist()
+        cmd.linear.x  = float(v)
+        cmd.angular.z = float(w)
+        self.cmd_vel_pub.publish(cmd)
         self.publish_paths(paths, v, w)
 
 

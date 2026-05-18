@@ -110,25 +110,20 @@ class GridMap:
         if radius_cells <= 0:
             return grid_data
 
-        # Gradient inflation: actual obstacle stays at 100 (hard reject).
-        # Cells within the inflation radius get a cost that decreases linearly
-        # from 99 (just outside the obstacle) to 1 (at the inflation boundary).
-        # This gives DWA a smooth repulsion field — trajectories close to walls
-        # are penalised but not hard-rejected, so the robot can navigate narrow
-        # corridors instead of freezing when it brushes the inflation zone.
+        # Pure gradient inflation: actual obstacle stays at 100 (hard reject).
+        # Cells within inflation_radius get a cost decreasing from 99 (closest)
+        # to 1 (at the boundary), giving DWA a smooth repulsion field.
+        # The gradient is steep enough near robot_radius that DWA strongly avoids
+        # those cells while still allowing passage through tight gaps if necessary.
+        # cost_scaling_factor > 1 keeps costs high further from the wall.
         inflated_grid = grid_data.copy().astype(np.int16)
         rows, cols = np.where(grid_data == 100)
 
         if len(rows) == 0:
             return inflated_grid.astype(np.int8)
 
-        # Iterate outer → inner so that inner (higher cost) rings overwrite
-        # outer (lower cost) rings for cells shared between disks.
+        # Iterate outer → inner so inner rings overwrite outer rings.
         for d in range(radius_cells, 0, -1):
-            # cost_scaling_factor shapes the gradient curve:
-            #   1.0 → linear (default)
-            #   >1.0 → costs stay high further from wall (more aggressive repulsion)
-            #   <1.0 → costs drop quickly, gentle repulsion near boundary
             linear = 1.0 - float(d) / radius_cells
             cost = max(1, round(99 * (linear ** (1.0 / cost_scaling_factor))))
 
@@ -148,7 +143,6 @@ class GridMap:
 
                 slc    = mask[m_r_start:m_r_end, m_c_start:m_c_end]
                 region = inflated_grid[r_start:r_end, c_start:c_end]
-                # Only raise cells — never downgrade actual obstacles (100).
                 region[slc & (region < cost)] = cost
 
         return np.clip(inflated_grid, -128, 127).astype(np.int8)
@@ -164,14 +158,14 @@ class OccupancyGridNode(Node):
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('laser_frame', 'turtlebot/rplidar')
         self.declare_parameter('p_occ', 0.9)
-        self.declare_parameter('inflation_radius', 0.18)
+        self.declare_parameter('inflation_radius', 0.25)
         self.declare_parameter('clear_on_max_range', True)
         # cost_scaling_factor controls how aggressively the DWA is repelled from walls.
         # cost = 99 * (1 - d/radius)^(1/factor)
         #   factor=1.0 → linear (default)
         #   factor>1.0 → costs stay HIGH further from the wall (more rejection)
         #   factor<1.0 → costs drop quickly near wall, gentle at boundary
-        self.declare_parameter('cost_scaling_factor', 1.5)
+        self.declare_parameter('cost_scaling_factor', 3.0)
 
         grid_size             = self.get_parameter('grid_size').value
         self.grid_resolution  = self.get_parameter('grid_resolution').value
@@ -201,7 +195,7 @@ class OccupancyGridNode(Node):
         self.map_pub          = self.create_publisher(OccupancyGrid, '/map',          10)
         self.inflated_map_pub = self.create_publisher(OccupancyGrid, '/inflated_map', 10)
         
-        self.timer = self.create_timer(0.2, self.timer_callback)  # 5 Hz
+        self.timer = self.create_timer(0.1, self.timer_callback)  # 5 Hz
 
     def quaternion_to_yaw(self, qx, qy, qz, qw):
         t3 = 2.0 * (qw * qz + qx * qy)
