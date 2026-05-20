@@ -35,6 +35,8 @@ setup(
                 'frontier_node = online_motion_planning.frontier_node:main',
                 'path_planner_tb = online_motion_planning.path_planner_tb:main',
                 'arm_retract_node = online_motion_planning.arm_retract_node:main',
+                'map_republisher = online_motion_planning.map_republisher:main',
+                'imu_ned_to_enu = online_motion_planning.imu_ned_to_enu:main',
                 'path_planner_no_spin = online_motion_planning.path_planner_no_spin:main',
         ],
     },

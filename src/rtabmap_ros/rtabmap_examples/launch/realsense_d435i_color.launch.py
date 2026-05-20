@@ -97,14 +97,14 @@ def generate_launch_description():
         ),
 
         
-        Node(
-            package='rtabmap_sync', executable='rgbd_sync', output='screen',
-            parameters=[{'approx_sync_max_interval': 0.02,
-                         'sync_queue_size': 1000,
-                        'topic_queue_size': 1000,
-                        'queue_size': 1000}
-                        ],
-            remappings=remappings),
+        # Node(
+        #     package='rtabmap_sync', executable='rgbd_sync', output='screen',
+        #     parameters=[{'approx_sync_max_interval': 0.02,
+        #                  'sync_queue_size': 1000,
+        #                 'topic_queue_size': 1000,
+        #                 'queue_size': 1000}
+        #                 ],
+        #     remappings=remappings),
         
 
         Node(
@@ -118,7 +118,8 @@ def generate_launch_description():
                 'subscribe_rgbd': False,
                 'approx_sync': True,
                 'visual_odometry': 'false',
-                'odom_topic': '/turtlebot/odom',                 # Connect to your localisation_node
+                # 'odom_topic': '/turtlebot/odom',               # raw odom
+                'odom_topic': '/odometry/filtered',              # EKF-fused odom (robot_localization)
                 'sync_queue_size': 1000,
                 'topic_queue_size': 1000,
                 'map_always_update': True,                 # CRITICAL: Keep map updating even if no features are detected
@@ -163,8 +164,8 @@ def generate_launch_description():
             }],
             remappings=remappings,
             arguments=['-d', LaunchConfiguration("args"), "--delete_db_on_start", ]),
-        Node(
-            package='rtabmap_viz', executable='rtabmap_viz', output='screen',
-            parameters=parameters,
-            remappings=remappings),
+        # Node(
+        #     package='rtabmap_viz', executable='rtabmap_viz', output='screen',
+        #     parameters=parameters,
+        #     remappings=remappings),
     ])

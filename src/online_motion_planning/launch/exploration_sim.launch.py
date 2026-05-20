@@ -2,12 +2,17 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+    DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+
+def xterm(title):
+    """Return an xterm prefix that opens a named terminal for the node."""
+    return f'xterm -title "{title}" -geometry 120x30 -e'
 
 
 def generate_launch_description():
@@ -35,23 +40,46 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(
                 get_package_share_directory('turtlebot_simulation'),
-                'launch', 'turtlebot_hoi_circuit1.launch.py'
+                'launch', 'turtlebot_hoi_circuit2.launch.py'
             )
         )
     )
 
     # ── Sub-launch: RTAB-Map ───────────────────────────────────────────────
-    # NOTE: realsense_d435i_color.launch.py is designed for the real camera but
-    # is also used here for simulation (the camera topics are remapped inside
-    # the simulation to match what RTAB-Map expects).  Replace with a
-    # simulation-specific launch if you have one.
-    rtabmap_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('rtabmap_examples'),
-                'launch', 'realsense_d435i_color.launch.py'
-            )
-        )
+    # Uses ExecuteProcess instead of IncludeLaunchDescription so xterm can be
+    # prepended — IncludeLaunchDescription inlines into the parent and has no
+    # prefix support.
+    rtabmap_launch = ExecuteProcess(
+        cmd=[
+            'xterm', '-title', 'RTAB-Map', '-geometry', '120x30', '-e',
+            'ros2', 'launch', 'rtabmap_examples', 'realsense_d435i_color.launch.py'
+        ],
+        output='screen'
+    )
+
+    # ── IMU NED→ENU converter ─────────────────────────────────────────────
+    # Stonefish IMU is in world_NED; negate yaw/omega_z before EKF fusion.
+    imu_converter_node = Node(
+        package='online_motion_planning',
+        executable='imu_ned_to_enu',
+        name='imu_ned_to_enu',
+        output='screen',
+    )
+
+    # ── EKF localisation (robot_localization) ─────────────────────────────
+    # Fuses /turtlebot/odom + /turtlebot/sensors/imu_enu (converted).
+    # Publishes /odometry/filtered.
+    ekf_params = os.path.join(
+        get_package_share_directory('online_motion_planning'),
+        'config', 'ekf_sim_params.yaml'
+    )
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_node',
+        output='screen',
+        # prefix=xterm('EKF-Localisation'),
+        parameters=[ekf_params]
     )
 
     # ── Image crop node ────────────────────────────────────────────────────
@@ -63,6 +91,7 @@ def generate_launch_description():
         executable='image_crop_node',
         name='image_crop_node',
         output='screen',
+        # prefix=xterm('ImageCrop'),
         parameters=[params_file]
     )
 
@@ -87,48 +116,48 @@ def generate_launch_description():
     global_costmap_node = Node(
         package='grid_mapping',
         executable='occupancy_grid_original',
-        name='global_costmap',      # matches YAML section 'global_costmap'
+        name='global_costmap',
         output='screen',
+        # prefix=xterm('GlobalCostmap'),
         parameters=[params_file]
     )
 
-    # ── DWA local costmap (dwa_planner) ───────────────────────────────────
-    # Builds a small sliding-window costmap from the real laser scan.
-    # Publishes /map_dwa (raw) and /inflated_map_dwa (inflated).
     dwa_local_costmap_node = Node(
         package='dwa_planner',
         executable='local_costmap',
-        name='dwa_local_costmap',   # matches YAML section 'dwa_local_costmap'
+        name='dwa_local_costmap',
         output='screen',
+        # prefix=xterm('DWA-LocalCostmap'),
         parameters=[params_file]
     )
 
-    # ── DWA service ────────────────────────────────────────────────────────
-    # Provides /dwa/compute_velocity; uses /inflated_map_dwa.
-    # dwa_service_node = Node(
-    #     package='dwa_planner',
-    #     executable='dwa_service',
-    #     name='dwa_service_node',    # matches YAML section 'dwa_service_node'
-    #     output='screen',
-    #     parameters=[params_file]
-    # )
+    dwa_service_node = Node(
+        package='dwa_planner',
+        executable='dwa_service',
+        name='dwa_service_node',
+        output='screen',
+        prefix=xterm('DWA-Service'),
+        parameters=[params_file],
+        remappings=[('/turtlebot/odom', '/odometry/filtered')]
+    )
 
-    # ── Frontier detection node ────────────────────────────────────────────
     frontier_node = Node(
         package='online_motion_planning',
         executable='frontier_node',
         name='frontier_node',
         output='screen',
+        prefix=xterm('FrontierExploration'),
         parameters=[params_file]
     )
 
-    # ── Path planner (BiRRT* + DWA waypoint execution) ─────────────────────
     path_planner_node = Node(
         package='online_motion_planning',
         executable='path_planner_tb',
         name='path_planner_tb',
         output='screen',
-        parameters=[params_file]
+        prefix=xterm('PathPlanner'),
+        parameters=[params_file],
+        remappings=[('/turtlebot/odom', '/odometry/filtered')]
     )
 
     rviz_node = Node(
@@ -156,7 +185,7 @@ def generate_launch_description():
         actions=[
             global_costmap_node,
             dwa_local_costmap_node,
-            # dwa_service_node,
+            dwa_service_node,
             frontier_node,
             path_planner_node,
         ]
@@ -166,6 +195,8 @@ def generate_launch_description():
         declare_map_frame,
         declare_scenario,
         sim_launch,
+        imu_converter_node,
+        ekf_node,
         sensor_nodes,
         rtabmap_delayed,
         planning_nodes,

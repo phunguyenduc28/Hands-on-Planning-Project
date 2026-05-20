@@ -106,11 +106,11 @@ def generate_launch_description():
                         ],
             parameters=[{'range_max': 10.0, 'output_frame': 'camera_link', 'range_min': 0.28}]
         ),
-        # Node(
-        #     package='rtabmap_odom', executable='rgbd_odometry', output='screen',
-        #     parameters=parameters,
-        #     arguments=[LaunchConfiguration    ("args"), LaunchConfiguration("odom_args")],
-        #     remappings=remappings),
+        Node(
+            package='rtabmap_odom', executable='rgbd_odometry', output='screen',
+            parameters=parameters,
+            arguments=[LaunchConfiguration    ("args"), LaunchConfiguration("odom_args")],
+            remappings=remappings),
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',

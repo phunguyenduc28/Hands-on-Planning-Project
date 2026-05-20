@@ -130,18 +130,18 @@ def generate_launch_description():
             parameters=[{'range_max': 2.0, 'output_frame': 'camera_link', 'range_min': 0.28}]
         ),
 
-        Node(
-            package='image_utils',
-            executable='image_crop_node',
-            name='image_crop_node',
-            parameters=[{'crop_bottom_fraction': 0.49}],
-            remappings=[
-                        # ('depth', '/turtlebot/camera/depth/image_depth'),
-                        ('/turtlebot/camera/color/image_color', '/turtlebot/camera/color/image_compressed'),
-                        ('/turtlebot/camera/depth/image_depth', '/turtlebot/camera/depth/image_rect_raw'),
-                        # ('scan', '/turtlebot/fake_scan'),
-                        ],
-        ),
+        # Node(
+        #     package='image_utils',
+        #     executable='image_crop_node',
+        #     name='image_crop_node',
+        #     parameters=[{'crop_bottom_fraction': 0.49}],
+        #     remappings=[
+        #                 # ('depth', '/turtlebot/camera/depth/image_depth'),
+        #                 ('/turtlebot/camera/color/image_color', '/turtlebot/camera/color/image_compressed'),
+        #                 ('/turtlebot/camera/depth/image_depth', '/turtlebot/camera/depth/image_rect_raw'),
+        #                 # ('scan', '/turtlebot/fake_scan'),
+        #                 ],
+        # ),
 
         # Robot state publisher - visualize robot in RViz
         # Node(

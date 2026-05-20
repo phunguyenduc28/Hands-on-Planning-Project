@@ -58,7 +58,7 @@ frontier_node:
     use_global_search_window: true
     # World-enu bounds of the exploration rectangle (metres).
     # Tune these to match the actual room dimensions.
-    global_x_min: -3.5
+    global_x_min: -3.0
     global_x_max:  3.0
     global_y_min: -5.0
     global_y_max:  1.0
@@ -70,6 +70,7 @@ path_planner_tb:
     is_sim: true
     acceptance_radius: 0.1
     scan_distance_threshold: 0.4
+    spin_speed: 0.3
     max_iterations: 4000
     max_consecutive_rejections: 6
     goal_timeout_sec: 30.0

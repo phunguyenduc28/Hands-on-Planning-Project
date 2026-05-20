@@ -73,10 +73,10 @@ class FrontierNode(Node):
         self.frontiers_ever_found = False
 
         # ── Rejection filters ────────────────────────────────────────────────
-        self.declare_parameter('min_frontier_dist_m', 0.2)
+        self.declare_parameter('min_frontier_dist_m', 0.3)
         self.min_frontier_dist_m = self.get_parameter('min_frontier_dist_m').value
         self.visited_frontier_positions = []
-        self.declare_parameter('visited_frontier_radius_m', 0.5)
+        self.declare_parameter('visited_frontier_radius_m', 0.3)
         self.visited_frontier_radius_m = self.get_parameter('visited_frontier_radius_m').value
 
         # ── Count-based search-window expansion ──────────────────────────────
@@ -89,11 +89,11 @@ class FrontierNode(Node):
         # use_global_search_window=False: robot-centred growing square
         self.declare_parameter('use_global_search_window', True)
         self.use_global_search_window = self.get_parameter('use_global_search_window').value
-        self.declare_parameter('global_x_min', -3.5)
+        self.declare_parameter('global_x_min', -1.5)
         self.global_x_min = self.get_parameter('global_x_min').value
-        self.declare_parameter('global_x_max', 3.0)
+        self.declare_parameter('global_x_max', 1.0)
         self.global_x_max = self.get_parameter('global_x_max').value
-        self.declare_parameter('global_y_min', -5.0)
+        self.declare_parameter('global_y_min', -20.0)
         self.global_y_min = self.get_parameter('global_y_min').value
         self.declare_parameter('global_y_max', 1.0)
         self.global_y_max = self.get_parameter('global_y_max').value

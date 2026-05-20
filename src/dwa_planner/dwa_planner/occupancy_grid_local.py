@@ -143,14 +143,16 @@ class OccupancyGridNode(Node):
         super().__init__('occupancy_grid_node')
         
         self.declare_parameter('grid_size', 5.0)
+        self.declare_parameter('is_sim', True)
         self.declare_parameter('grid_resolution', 0.05)
         self.declare_parameter('map_frame', 'world_enu')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('laser_frame', 'turtlebot/rplidar')
         self.declare_parameter('p_occ', 0.9)
         self.declare_parameter('inflation_radius', 0.2)
-        self.declare_parameter('clear_on_max_range', False)
+        self.declare_parameter('clear_on_max_range', True)
         
+        self.is_sim = self.get_parameter('is_sim').value
         grid_size             = self.get_parameter('grid_size').value
         self.grid_resolution  = self.get_parameter('grid_resolution').value
         self.map_frame        = self.get_parameter('map_frame').value
@@ -257,8 +259,11 @@ class OccupancyGridNode(Node):
                 if effective_range < min_range:
                     continue
 
-            
-                beam_angle = laser_yaw - angle_laser
+                if self.is_sim:
+                    beam_angle = laser_yaw - angle_laser
+                
+                else:
+                    beam_angle = laser_yaw + angle_laser
 
                 if is_max_range:
                     effective_range *= 0.9

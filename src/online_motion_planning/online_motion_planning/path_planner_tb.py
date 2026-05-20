@@ -57,7 +57,8 @@ class PathPlannerNode(Node):
         self.declare_parameter('scan_distance_threshold', 0.4)
         self.scan_distance_threshold = self.get_parameter('scan_distance_threshold').value
         self.max_linear_velocity = 0.3
-        self.max_angular_velocity = 0.3
+        self.declare_parameter('spin_speed', 0.3)
+        self.max_angular_velocity = self.get_parameter('spin_speed').value
         self.kv = 0.5     # pure-pursuit fallback gain
         self.kw = 1.0
 
@@ -67,6 +68,11 @@ class PathPlannerNode(Node):
         self.resolution = None
         self.height = None
         self.width = None
+
+        # Latch set True only when RTAB-Map publishes a real /map update
+        # (not the /map_fast republisher).  Used to pause at each waypoint
+        # until the map is genuinely fresh before deciding scan/move.
+        self._rtab_map_latch = False
 
         self.declare_parameter('map_frame', 'world_enu')
         self.binary_map_frame = self.get_parameter('map_frame').value
@@ -116,6 +122,8 @@ class PathPlannerNode(Node):
         # ── Rotation state machine ───────────────────────────────────────────
         # States: 'idle', 'scanning_360', 'moving', 'spinning_360', 'halted'
         self.rotation_state = 'idle'
+        # Allow one re-check after the terminal spin before permanently halting.
+        self._post_spin_checked = False
         self.prev_yaw_for_spin = None
         self.spin_accumulated = 0.0
         self.last_scan_pos = None
@@ -152,6 +160,10 @@ class PathPlannerNode(Node):
             self._exploration_complete_cb, 10)
         self.create_subscription(
             Bool, '/arm/is_retracted', self._arm_retracted_cb, 10)
+        # Subscribes to raw RTAB-Map /map ONLY to fire the latch — map data
+        # itself is not used here; all planning uses /inflated_map via /map_fast.
+        self.create_subscription(
+            OccupancyGrid, '/map', self._rtab_map_direct_cb, 10)
 
         # ── Timers ───────────────────────────────────────────────────────────
         self.control_timer = self.create_timer(0.1, self.control_loop)   # 10 Hz
@@ -181,6 +193,9 @@ class PathPlannerNode(Node):
         self.binary_map = np.where(copy.deepcopy(raw) >= 99, 1, 0)
 
     def _frontier_goal_cb(self, msg):
+        # Block only terminal states — scanning_360 is intentionally allowed so
+        # a frontier published while the robot scans is queued immediately rather
+        # than dropped. path_planning_loop will plan to it once the scan finishes.
         if self.rotation_state in ('spinning_360', 'halted') or self.following_last_path:
             return
         new_goal = [msg.pose.position.x, msg.pose.position.y]
@@ -203,6 +218,11 @@ class PathPlannerNode(Node):
 
     def _arm_retracted_cb(self, msg):
         self.arm_is_retracted = msg.data
+
+    def _rtab_map_direct_cb(self, _msg):
+        """Fires only when RTAB-Map publishes a genuine /map update (not /map_fast).
+        Sets the latch so the planner knows fresh map data is available."""
+        self._rtab_map_latch = True
 
     # ── Helper utilities ─────────────────────────────────────────────────────
 
@@ -619,6 +639,34 @@ class PathPlannerNode(Node):
             self._do_spin()
             return
 
+        # ── Waiting for a genuine RTAB-Map update before moving on ───────────
+        if self.rotation_state == 'waiting_map':
+            self.cmd_vel_pub.publish(Twist())
+            if not self._rtab_map_latch:
+                self.get_logger().info(
+                    '[MAP-WAIT] Stopped — waiting for RTAB-Map to publish an update...',
+                    throttle_duration_sec=3.0)
+                return
+            # Map arrived — clear latch and decide: scan or move
+            self._rtab_map_latch = False
+            robot_pos = (self.robot_pose.x, self.robot_pose.y)
+            if (self.last_scan_pos is None
+                    or math.hypot(robot_pos[0] - self.last_scan_pos[0],
+                                  robot_pos[1] - self.last_scan_pos[1])
+                    > self.scan_distance_threshold):
+                self.get_logger().info(
+                    '[MAP-WAIT] Map updated — starting 360° scan')
+                self.rotation_state = 'scanning_360'
+                self.prev_yaw_for_spin = None
+                self.spin_accumulated = 0.0
+                self.last_scan_pos = robot_pos
+            else:
+                self.get_logger().info(
+                    '[MAP-WAIT] Map updated — moving to next waypoint '
+                    f'(within scan_distance_threshold={self.scan_distance_threshold}m)')
+                self.rotation_state = 'moving'
+            return
+
         # ── No waypoints — stop and signal idle ───────────────────────────────
         if self.waypoints is None or len(self.waypoints) == 0:
             self.cmd_vel_pub.publish(Twist())
@@ -673,8 +721,22 @@ class PathPlannerNode(Node):
             self.prev_yaw_for_spin = self.current_yaw
         if self.spin_accumulated >= 2 * math.pi - 0.1:
             self.cmd_vel_pub.publish(Twist())
-            self.rotation_state = 'halted'
-            self.get_logger().info('360° spin complete — halted')
+            if not self._post_spin_checked:
+                # First terminal spin done — give frontier detection one more chance.
+                self._post_spin_checked = True
+                self.exploration_done = False
+                self.goal_pose = None
+                self.waypoints = None
+                self.rotation_state = 'idle'
+                self._last_trigger_time = self.get_clock().now()
+                self._trigger_frontier_search()
+                self.get_logger().info(
+                    '[SPIN] Terminal spin complete — re-checking for frontiers '
+                    f'(timeout in {self.goal_timeout_sec:.0f}s)')
+            else:
+                # Second spin with no frontier found → truly done.
+                self.rotation_state = 'halted'
+                self.get_logger().info('[SPIN] No new frontiers after re-check — halted')
         else:
             cmd = Twist()
             cmd.angular.z = self.max_angular_velocity
@@ -697,6 +759,14 @@ class PathPlannerNode(Node):
             self.cmd_vel_pub.publish(Twist())
             self.rotation_state = 'moving'
             self.get_logger().info('Waypoint scan complete — moving')
+            # If no frontier goal arrived during the scan, explicitly request one.
+            # This handles the case where the robot faces a wall: the scan may not
+            # reveal new geometry, so frontier_node needs a nudge to re-evaluate.
+            if self.goal_pose is None and not self.exploration_done:
+                self.get_logger().info(
+                    '[SCAN] No frontier goal received during scan — triggering search')
+                self._last_trigger_time = self.get_clock().now()
+                self._trigger_frontier_search()
         else:
             cmd = Twist()
             cmd.angular.z = self.max_angular_velocity
@@ -731,20 +801,23 @@ class PathPlannerNode(Node):
                         self._notify_goal_reached(
                             reached_goal[0], reached_goal[1])
                     self.consecutive_rejections = 0   # success resets counter
-                    self.get_logger().info('All waypoints reached')
-                    self.rotation_state = 'idle'
+                    self.get_logger().info(
+                        'All waypoints reached — scanning 360° to discover new frontiers')
+                    self.rotation_state = 'scanning_360'
+                    self.prev_yaw_for_spin = None
+                    self.spin_accumulated = 0.0
+                    self.last_scan_pos = (self.robot_pose.x, self.robot_pose.y)
                 return
 
-            # Intermediate waypoint — scan if at a new location
-            robot_pos = (self.robot_pose.x, self.robot_pose.y)
-            if (self.last_scan_pos is None
-                    or math.hypot(robot_pos[0] - self.last_scan_pos[0],
-                                  robot_pos[1] - self.last_scan_pos[1])
-                    > self.scan_distance_threshold):
-                self.rotation_state = 'scanning_360'
-                self.prev_yaw_for_spin = None
-                self.spin_accumulated = 0.0
-                self.last_scan_pos = robot_pos
+            # Intermediate waypoint reached — wait for a fresh RTAB-Map update
+            # before deciding whether to scan or move on.
+            remaining = len(self.waypoints)
+            self.get_logger().info(
+                f'[WAYPOINT] Reached intermediate waypoint — '
+                f'{remaining} waypoint(s) remaining. '
+                f'Waiting for RTAB-Map update...')
+            self._rtab_map_latch = False   # clear any stale latch
+            self.rotation_state = 'waiting_map'
             return
 
         # ── Drive toward waypoint via DWA (or pure-pursuit fallback) ─────────
