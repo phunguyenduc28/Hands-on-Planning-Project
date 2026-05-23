@@ -6,6 +6,7 @@
 
 import os
 import math
+from datetime import datetime
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -37,6 +38,12 @@ from launch_ros.parameter_descriptions import ParameterValue
 #           ('rgb/camera_info', '/turtlebot/camera/color/camera_info'),
 #           ('depth/image', '/turtlebot/camera/depth/image_depth')]
 def generate_launch_description():
+    _db_dir = os.path.expanduser('~/ROS2_Crash_Course/Hands-on-Planning-frontier/rtabmap_databases')
+    os.makedirs(_db_dir, exist_ok=True)
+    _db_path = os.path.join(
+        _db_dir,
+        'rtabmap_{}.db'.format(datetime.now().strftime('%Y-%m-%d_%H-%M-%S')))
+
     # Locate packages
     # pkg_turtlebot_desc = FindPackageShare('turtlebot_description')
 
@@ -197,9 +204,10 @@ def generate_launch_description():
             package='rtabmap_slam', executable='rtabmap', output='screen',
             # prefix=['gnome-terminal -- gdb -ex run --args'],
             parameters=[{
+                'database_path': _db_path,
                 # 'frame_id': 'turtlebot/base_footprint',
                 'frame_id': 'base_footprint', # Match your localisation_node
-                # 'subscribe_depth': True,
+                'subscribe_depth': True,
                 'subscribe_scan': True,                # : Subscribe to the fake scan
                 'subscribe_rgbd': False,
                 'approx_sync': True,
@@ -248,12 +256,13 @@ def generate_launch_description():
                 
             }],
             remappings=remappings,
-            arguments=['-d', LaunchConfiguration("args"), "--delete_db_on_start", ]),
+            # "--delete_db_on_start" removed — map is preserved across runs
+            arguments=['-d', LaunchConfiguration("args")]),
 
-        # Node(
-        #     package='rtabmap_viz', executable='rtabmap_viz', output='screen',
-        #     parameters=parameters,
-        #     remappings=remappings),
+        Node(
+            package='rtabmap_viz', executable='rtabmap_viz', output='screen',
+            parameters=parameters,
+            remappings=remappings),
 
         # # Compute quaternion of the IMU
         # Node(

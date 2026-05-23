@@ -9,9 +9,9 @@
 image_crop_node:
   ros__parameters:
     # Fraction of image height removed from the BOTTOM for RTAB-Map (removes floor)
-    crop_bottom_fraction: 0.49
+    crop_bottom_fraction: 0.49dwa_aligning
     # Fraction removed from the TOP of the scan depth image (removes robot arm)
-    scan_crop_top_fraction: 0.25
+    scan_crop_top_fraction: 0.45
     # Fraction removed from the BOTTOM of the scan depth image (removes floor)
     scan_crop_bottom_fraction: 0.49
     # Spatial outlier filter for the fake laser scan depth slice
@@ -24,7 +24,7 @@ image_crop_node:
 global_costmap:
   ros__parameters:
     map_frame: odom
-    inflation_radius: 0.25
+    inflation_radius: 0.2
 
 # ── DWA local costmap — dwa_planner ──────────────────────────────────────────
 # Builds a sliding-window costmap from the real RPLidar scan.
@@ -35,7 +35,7 @@ dwa_local_costmap:
     laser_frame: rplidar
     grid_size: 2.0
     grid_resolution: 0.05
-    inflation_radius: 0.25
+    inflation_radius: 0.2
     is_sim: false
 
 # ── DWA service (dwa_planner) ───────────────────────────────────────────────
@@ -46,18 +46,23 @@ dwa_service_node:
     # the motor controllers and the robot does not move.
     vel_deadzone_linear: 0.1
     vel_deadzone_angular: 0.5
+    use_depth_gate: true      # enforce camera-stall check on real robot
+    adaptive_horizon: true   # set false to use fixed predict_time=3.0s
+    normalize_yaw: true      # set false to disable yaw wrapping
+    use_odom_velocity: false  # true=real robot, false=sim
+
 
 # ── Frontier detection (online_motion_planning) ──────────────────────────────
 frontier_node:
   ros__parameters:
     map_frame: odom
-    min_frontier_dist_m: 0.2
+    min_frontier_dist_m: 0.3
     visited_frontier_radius_m: 0.5
     # Robot-centred growing window — does not require knowing the room bounds.
     use_global_search_window: true
     global_x_min: -3.0
-    global_x_max:  3.0
-    global_y_min: -2.0
+    global_x_max:  4.0
+    global_y_min: -4.0
     global_y_max:  4.0
 
 # ── Path planner / BiRRT* (online_motion_planning) ──────────────────────────
@@ -65,12 +70,47 @@ path_planner_tb:
   ros__parameters:
     map_frame: odom
     is_sim: false
+    map_update_topic: /map_scan  # real robot: scan-based occupancy grid
     acceptance_radius: 0.15
     scan_distance_threshold: 0.4
-    spin_speed: 0.5
+    spin_speed: 0.6
+    spin_depth_gate: false    # set false to disable depth gating during spins
+
+
+    # ── Stuck detection ──────────────────────────────────────────────────────
+    # Two independent triggers — whichever fires first rejects the goal.
+    #
+    # Trigger 1 — Timeout (catches slow creep / circling):
+    #   If the robot's best-ever distance to the waypoint hasn't improved by
+    #   stuck_progress_threshold within stuck_timeout_sec, the waypoint is
+    #   declared unreachable.
+    #   Tune stuck_timeout_sec: longer = more patience for slow DWA detours,
+    #     but more time wasted on truly blocked waypoints.
+    #     Start at 15–20 s.  Drop toward 8–10 s once you trust the robot.
+    #   Tune stuck_progress_threshold: how much closer (m) counts as "progress".
+    #     Too small (< 0.03 m) → noise keeps resetting the clock; too large
+    #     (> 0.15 m) → robot must lunge forward to reset, DWA detours wrongly fire.
+    #     0.05 m is reliable at typical DWA speeds of 0.2–0.3 m/s.
+    stuck_timeout_sec: 9999.0        # effectively disabled
+    stuck_progress_threshold: 0.05
+
+    # Trigger 2 — Regression (catches a wall actively pushing robot backward):
+    #   If current distance to waypoint exceeds the distance recorded on the
+    #   FIRST tick toward that waypoint by stuck_regression_threshold, reject
+    #   immediately — no need to wait for the full timeout.
+    #   Tune stuck_regression_threshold:
+    #     Must be larger than the worst-case DWA detour arc around a local
+    #     obstacle that is NOT a dead-end wall.  For a TurtleBot in a typical
+    #     room, a chair or table leg forces at most ~0.2–0.25 m of detour.
+    #     Set to 0.35 m gives 0.1 m margin above that.
+    #     If you see false positives (valid goals rejected mid-detour), raise
+    #     toward 0.5 m.  If walls take too long to detect, lower toward 0.25 m.
+    stuck_regression_threshold: 9999.0  # effectively disabled
+
     max_iterations: 4000
     max_consecutive_rejections: 6
     goal_timeout_sec: 30.0
+    enable_return_to_start: false   # set false to halt immediately after re-check spin
 
 # ── Path planner / BiRRT* — no-spin variant ──────────────────────────────────
 path_planner_no_spin:

@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'image_crop_node = image_utils.image_crop_node:main',
+            'rtabmap_sync_node = image_utils.rtabmap_sync_node:main',
         ],
     },
 )

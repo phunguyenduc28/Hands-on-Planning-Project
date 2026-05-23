@@ -37,24 +37,42 @@ def generate_launch_description():
         output='screen'
     )
 
+    # ── EKF localisation (DISABLED — replaced by custom localization node) ────
     ekf_params = os.path.join(
         get_package_share_directory('online_motion_planning'),
-        'config', 'ekf_sim_params.yaml'
+        'config', 'ekf_sim_params_real.yaml'
     )
     ekf_node = Node(
         package='robot_localization',
         executable='ekf_node',
         name='ekf_node',
         output='screen',
-        # prefix=xterm('EKF-Localisation'),
         parameters=[ekf_params]
     )
+
+    # ── Custom EKF localisation (wheel encoders + IMU) ─────────────────────
+    # Subscribes: /turtlebot/joint_states, /turtlebot/imu
+    # Publishes:  /turtlebot/odom_ekf  +  TF odom→base_footprint
+    # localization_node = Node(
+    #     package='localization',
+    #     executable='localization',
+    #     name='differential_drive_ekf',
+    #     output='screen',
+    #     parameters=[{
+    #         'odom_frame':             'odom',
+    #         'base_frame':             'base_footprint',
+    #         'wheel_left_joint_name':  'wheel_left_joint',
+    #         'wheel_right_joint_name': 'wheel_right_joint',
+    #         # publish_tf=True: broadcasts odom_ekf→odom correction transform.
+    #         # No conflict with robot driver's odom→base_footprint.
+    #         'publish_tf':             True,
+    #     }],
+    # )
     # ── Image crop node ────────────────────────────────────────────────────
     # Produces:
-    #   /turtlebot/camera/depth/image_cropped       → RTAB-Map
-    #   /turtlebot/camera/depth/image_scan_cropped  → depthimage_to_laserscan
-    # NOTE: depthimage_to_laserscan is owned by the rtabmap launch — do NOT
-    # launch a second instance here.
+    #   /turtlebot/camera/depth/image_cropped        → depthimage_to_laserscan
+    #   /turtlebot/camera/depth/camera_info_cropped  → depthimage_to_laserscan
+    #   /turtlebot/camera/color/image_cropped        → rtabmap_sync_node
     image_crop_node = Node(
         package='image_utils',
         executable='image_crop_node',
@@ -69,31 +87,95 @@ def generate_launch_description():
                         ],
     )
 
-    # ── Map republisher ────────────────────────────────────────────────────
-    # RTAB-Map publishes /map infrequently. This node caches the latest map
-    # and republishes it at a steady rate so downstream nodes keep running.
-    map_republisher_node = Node(
-        package='online_motion_planning',
-        executable='map_republisher',
-        name='map_republisher',
+    # ── Depth image → fake 2-D laser scan ─────────────────────────────────
+    # Converts the bottom-cropped depth image into a LaserScan on
+    # /turtlebot/fake_scan used by global_scan_map_node and DWA.
+    # Starts after image_crop_node (both in sensor_nodes at t=2 s).
+    depth_to_laserscan_node = Node(
+        package='depthimage_to_laserscan',
+        executable='depthimage_to_laserscan_node',
+        name='depthimage_to_laserscan',
         output='screen',
-        prefix=xterm('MapRepublisher'),
-        parameters=[{'input_topic': '/map',
-                     'output_topic': '/map_fast',
-                     'publish_rate': 2.0}]
+        remappings=[
+            ('depth',            '/turtlebot/camera/depth/image_cropped'),
+            ('depth_camera_info','/turtlebot/camera/depth/camera_info_cropped'),
+            ('scan',             '/turtlebot/fake_scan'),
+        ],
+        parameters=[{
+            'range_min':    0.28,
+            'range_max':    2.0,
+            'output_frame': 'camera_link',
+        }],
     )
 
-    # ── Global costmap (grid_mapping) ──────────────────────────────────────
-    # Subscribes to /map_fast (republished at steady rate) → inflates → /inflated_map.
-    global_costmap_node = Node(
+    # ── RTAB-Map sync node ────────────────────────────────────────────────
+    # Synchronises color image, depth image, color camera_info, depth camera_info,
+    # and fake scan so RTAB-Map receives a coherent time base on all five topics.
+    # Must start after image_crop_node produces the cropped topics.
+    # rtabmap_sync_node = Node(
+    #     package='image_utils',
+    #     executable='rtabmap_sync_node',
+    #     name='rtabmap_sync_node',
+    #     output='screen',
+    #     parameters=[{'slop': 0.5, 'queue_size': 50}],
+    # )
+
+    # ── Global scan map (fake 2-D lidar → persistent occupancy grid) ─────────
+    # Same log-odds ray-casting as the DWA local costmap but with a fixed
+    # origin and no clearing, so the map accumulates over the full exploration.
+    # Publishes /map_scan (raw) and /inflated_map_scan (inflated).
+    global_scan_map_node = Node(
         package='grid_mapping',
-        executable='occupancy_grid_original',
-        name='global_costmap',
+        executable='scan_map_global',
+        name='global_scan_map_node',
         output='screen',
-        # prefix=xterm('GlobalCostmap'),
-        parameters=[params_file],
-        remappings=[('/map', '/map_fast')]
+        prefix=xterm('Global_costmap'),
+        parameters=[{
+            'map_size':         30.0,
+            'map_resolution':   0.05,
+            # 'map_frame':        'odom_ekf',
+            'map_frame':        'odom',
+            'laser_frame':      'camera_link',
+            'scan_topic':       '/turtlebot/fake_scan',
+            'odom_topic':       '/turtlebot/odom',          # raw wheel odom
+            # 'odom_topic':       '/turtlebot/odom_ekf',  # EKF-fused odom
+            'p_occ':            0.85,
+            'inflation_radius': 0.18,
+            'publish_rate':     2.0,
+            'range_min':        0.28,
+            'range_max':        2.0,
+            # 'clear_on_max_range': True,   # creates phantom frontiers with depth-image scan
+            'clear_on_max_range': False,
+        }],
+        # remappings=[('/turtlebot/odom', '/odometry/filtered')]  # old EKF topic
+        # remappings=[('/turtlebot/odom', '/turtlebot/odom_ekf')]
+
     )
+
+    # ── Map republisher (DISABLED — replaced by global_scan_map_node) ────────
+    # map_republisher_node = Node(
+    #     package='online_motion_planning',
+    #     executable='map_republisher',
+    #     name='map_republisher',
+    #     output='screen',
+    #     prefix=xterm('MapRepublisher'),
+    #     parameters=[{'input_topic': '/map',
+    #                  'output_topic': '/map_fast',
+    #                  'publish_rate': 2.0}]
+    # )
+
+    # ── Global costmap (DISABLED — replaced by global_scan_map_node) ──────────
+    # global_scan_map_node publishes /map_scan (raw) and /inflated_map_scan
+    # (inflated) directly at a steady rate, so neither a republisher nor a
+    # separate inflator is needed.
+    # global_costmap_node = Node(
+    #     package='grid_mapping',
+    #     executable='occupancy_grid_original',
+    #     name='global_costmap',
+    #     output='screen',
+    #     parameters=[params_file],
+    #     remappings=[('/map', '/map_fast')]
+    # )
 
     # ── DWA local costmap (dwa_planner) ───────────────────────────────────
     # Builds a sliding-window costmap from the real RPLidar /turtlebot/scan.
@@ -117,10 +199,15 @@ def generate_launch_description():
         output='screen',
         prefix=xterm('DWA-Service'),
         parameters=[params_file],
-        remappings=[('/turtlebot/odom', '/odometry/filtered')]
+        remappings=[
+            ('/turtlebot/odom', '/odometry/filtered'),  # old robot_localization EKF
+            # ('/turtlebot/odom', '/turtlebot/odom_ekf'),
+        ]
     )
 
     # ── Frontier detection ─────────────────────────────────────────────────
+    # /map        → /map_scan          (raw scan map for frontier cell detection)
+    # /inflated_map → /inflated_map_scan (inflated scan map for BFS reachability)
     frontier_node = Node(
         package='online_motion_planning',
         executable='frontier_node',
@@ -128,11 +215,17 @@ def generate_launch_description():
         output='screen',
         prefix=xterm('FrontierExploration'),
         parameters=[params_file],
-        remappings=[('/map', '/map_fast')]
+        remappings=[
+            ('/map',            '/map_scan'),
+            ('/inflated_map',   '/inflated_map_scan'),
+            ('/turtlebot/odom', '/odometry/filtered'),  # old robot_localization EKF
+            # ('/turtlebot/odom', '/turtlebot/odom_ekf'),
+        ]
     )
 
     # ── Path planner (BiRRT* + DWA waypoint execution) ─────────────────────
     # is_sim=false → arm_is_retracted=True from startup; no arm_retract_node needed.
+    # /inflated_map → /inflated_map_scan (inflated scan map for BiRRT* binary_map)
     path_planner_node = Node(
         package='online_motion_planning',
         executable='path_planner_tb',
@@ -140,8 +233,11 @@ def generate_launch_description():
         output='screen',
         prefix=xterm('PathPlanner'),
         parameters=[params_file],
-        remappings=[('/turtlebot/odom', '/odometry/filtered')]
-
+        remappings=[
+            ('/turtlebot/odom', '/odometry/filtered'),  # old robot_localization EKF
+            # ('/turtlebot/odom', '/turtlebot/odom_ekf'),
+            ('/inflated_map',   '/inflated_map_scan'),
+        ]
     )
 
     rviz_node = Node(
@@ -156,14 +252,16 @@ def generate_launch_description():
     # Image crop and RViz start shortly after — they only need the camera driver.
     sensor_nodes = TimerAction(
         period=2.0,
-        actions=[image_crop_node, rviz_node]
+        # actions=[image_crop_node, depth_to_laserscan_node, rtabmap_sync_node, global_scan_map_node, rviz_node]
+        actions=[image_crop_node, depth_to_laserscan_node, global_scan_map_node, rviz_node]
+
     )
 
-    # Planning nodes wait for RTAB-Map to have built enough map.
+    # Planning nodes wait for the scan map to accumulate enough data.
+    # 8 s is sufficient — scan map starts at t=2 s and builds immediately.
     planning_nodes = TimerAction(
-        period=15.0,
+        period=8.0,
         actions=[
-            global_costmap_node,
             dwa_local_costmap_node,
             dwa_service_node,
             frontier_node,
@@ -173,8 +271,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         declare_map_frame,
-        map_republisher_node,
-        ekf_node,
+        ekf_node,          # DISABLED — replaced by localization_node
+        # localization_node,
         rtabmap_launch,
         sensor_nodes,
         planning_nodes,

@@ -29,17 +29,25 @@ class Localisation_Node(Node):
         super().__init__('differential_drive_ekf')
 
         # Parameters
-        self.declare_parameter('odom_frame', 'world_enu') # Per Lab Requirement
+        # self.declare_parameter('odom_frame', 'world_enu') # Per Lab Requirement
+        self.declare_parameter('odom_frame', 'odom')
         # self.declare_parameter('odom_frame', 'odom') #<- for rosbag file
-        self.declare_parameter('base_frame', 'turtlebot/base_footprint')
+        # self.declare_parameter('base_frame', 'turtlebot/base_footprint')
+        self.declare_parameter('base_frame', 'base_footprint')
         # self.declare_parameter('base_frame', 'base_footprint')#<- for rosbag file
+
+        # self.declare_parameter('wheel_left_joint_name', 'turtlebot/wheel_left_joint')
+        # self.declare_parameter('wheel_right_joint_name', 'turtlebot/wheel_right_joint')
 
         self.declare_parameter('wheel_left_joint_name', 'turtlebot/wheel_left_joint')
         self.declare_parameter('wheel_right_joint_name', 'turtlebot/wheel_right_joint')
+        # Set False when the robot driver already publishes odom→base_footprint TF
+        # to avoid TF_OLD_DATA conflicts (two publishers, same frame pair).
+        self.declare_parameter('publish_tf', True)
 
-
-        self.odom_frame = self.get_parameter('odom_frame').value
-        self.base_frame = self.get_parameter('base_frame').value
+        self.odom_frame   = self.get_parameter('odom_frame').value
+        self.base_frame   = self.get_parameter('base_frame').value
+        self.publish_tf   = self.get_parameter('publish_tf').value
         self.left_wheel_name = self.get_parameter('wheel_left_joint_name').value
         self.right_wheel_name = self.get_parameter('wheel_right_joint_name').value
 
@@ -63,14 +71,27 @@ class Localisation_Node(Node):
         # Ground truth odometry for comparison
         self.ground_truth_odom = None
 
+        # Raw odometry from robot driver — used to compute the odom_ekf→odom
+        # correction transform so there is no TF frame conflict.
+        self.raw_odom_x     = 0.0
+        self.raw_odom_y     = 0.0
+        self.raw_odom_theta = 0.0
+
         # Publishers, Subscribers, and TF
         self.js_sub = self.create_subscription(JointState, '/turtlebot/joint_states', self.joint_state_callback, 10)
-        self.imu_sub = self.create_subscription(Imu, '/turtlebot/sensors/imu_data', self.imu_callback, 10)
-        self.gt_odom_sub = self.create_subscription(Odometry, '/turtlebot/odom_ground_truth', self.ground_truth_callback, 10)
-        self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
+        # self.imu_sub = self.create_subscription(Imu, '/turtlebot/sensors/imu_data', self.imu_callback, 10)
+        self.imu_sub = self.create_subscription(Imu, '/turtlebot/imu', self.imu_callback, 10)
+        self.raw_odom_sub = self.create_subscription(Odometry, '/turtlebot/odom', self._raw_odom_cb, 10)
+        # self.gt_odom_sub = self.create_subscription(Odometry, '/turtlebot/odom_ground_truth', self.ground_truth_callback, 10)
+        self.odom_pub = self.create_publisher(Odometry, '/turtlebot/odom_ekf', 10)
         self.tf_br = TransformBroadcaster(self)
         # self.get_logger().info(f"Odom Node Started. Base: {self.base_frame}, Odom: {self.odom_frame}")
 
+
+    def _raw_odom_cb(self, msg):
+        self.raw_odom_x     = msg.pose.pose.position.x
+        self.raw_odom_y     = msg.pose.pose.position.y
+        self.raw_odom_theta = self.euler_from_quaternion(msg.pose.pose.orientation)
 
     def euler_from_quaternion(self, q):
         t3 = +2.0 * (q.w * q.z + q.x * q.y)
@@ -114,8 +135,8 @@ class Localisation_Node(Node):
         if not self.first_received: return
 
         # Measurement: Extract Yaw from IMU
-        z = -self.euler_from_quaternion(msg.orientation) # IMU in NED frame so need conversion to ENU
-        
+        # z = -self.euler_from_quaternion(msg.orientation) # IMU in NED frame so need conversion to ENU
+        z = self.euler_from_quaternion(msg.orientation) # IMU in real world already correct
         R = msg.orientation_covariance[8]
         # Innovation (Residual): y = z - Hx
         # H is [0, 0, 1] because we only measure theta
@@ -145,7 +166,15 @@ class Localisation_Node(Node):
             # wheel_vels += np.random.normal(np.array([0.0, 0.0]), stdev_wheel_vel) # simulate random wheel noise
         except ValueError: return
 
-        now = self.get_clock().now()
+        # Use the message's own timestamp so TF is on the robot's clock,
+        # consistent with odom→base_footprint published by the robot driver.
+        # Falls back to laptop clock only if the driver doesn't stamp messages.
+        stamp = msg.header.stamp
+        if stamp.sec == 0 and stamp.nanosec == 0:
+            now = self.get_clock().now()
+        else:
+            now = rclpy.time.Time.from_msg(stamp)
+
         if not self.first_received:
             self.last_time, self.first_received = now, True
             return
@@ -163,18 +192,36 @@ class Localisation_Node(Node):
     def broadcast_and_publish(self, time):
         q = self.quaternion_from_euler(self.th)
         
-        # TF Broadcast for RViz Lidar projection 
-        t = TransformStamped()
-        t.header.stamp = time.to_msg()
-        t.header.frame_id = self.odom_frame
-        t.child_frame_id = self.base_frame
-        t.transform.translation.x, t.transform.translation.y = self.x, self.y
-        t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = 0.0, 0.0, q[2], q[3]
-        self.tf_br.sendTransform(t)
+        if self.publish_tf:
+            # Publish odom_ekf → odom correction transform.
+            # T_correction = T_ekf_pose * inverse(T_raw_odom_pose)
+            # This inserts odom_ekf as a parent of odom without conflicting with
+            # the robot driver's odom → base_footprint transform.
+            rx, ry, rt = self.raw_odom_x, self.raw_odom_y, self.raw_odom_theta
+            # Inverse of raw odom pose [rx, ry, rt]
+            inv_x = -rx * math.cos(rt) - ry * math.sin(rt)
+            inv_y =  rx * math.sin(rt) - ry * math.cos(rt)
+            # Compose EKF pose with inverse of raw odom
+            corr_th = self.th - rt
+            corr_x  = self.x + inv_x * math.cos(self.th) - inv_y * math.sin(self.th)
+            corr_y  = self.y + inv_x * math.sin(self.th) + inv_y * math.cos(self.th)
+            qc = self.quaternion_from_euler(corr_th)
+            t = TransformStamped()
+            t.header.stamp    = time.to_msg()
+            t.header.frame_id = 'odom_ekf'   # parent: EKF map frame
+            t.child_frame_id  = 'odom'        # child:  raw odometry frame
+            t.transform.translation.x = corr_x
+            t.transform.translation.y = corr_y
+            t.transform.translation.z = 0.0
+            t.transform.rotation.x    = 0.0
+            t.transform.rotation.y    = 0.0
+            t.transform.rotation.z    = qc[2]
+            t.transform.rotation.w    = qc[3]
+            self.tf_br.sendTransform(t)
 
         # Odometry Message
         odom = Odometry()
-        odom.header.stamp, odom.header.frame_id = time.to_msg(), self.odom_frame
+        odom.header.stamp, odom.header.frame_id = time.to_msg(), 'odom_ekf'
         odom.child_frame_id = self.base_frame
         odom.pose.pose.position.x, odom.pose.pose.position.y = self.x, self.y
         odom.pose.pose.orientation.z, odom.pose.pose.orientation.w = q[2], q[3]

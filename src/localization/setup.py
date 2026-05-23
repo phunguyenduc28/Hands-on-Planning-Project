@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'localization = localization.localization:main',
+            'localization     = localization.localization:main',
+            'localization_sim = localization.localization_sim:main',
         ],
     },
 )

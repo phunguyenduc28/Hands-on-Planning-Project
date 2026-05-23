@@ -6,6 +6,7 @@ import math
 from geometry_msgs.msg import Point
 from std_msgs.msg import ColorRGBA
 from nav_msgs.msg import Odometry, OccupancyGrid
+from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker, MarkerArray
 
 from dwa_interfaces.srv import ComputeVelocity
@@ -35,23 +36,46 @@ class DWAServiceNode(Node):
         self.max_speed     = 0.26   # TurtleBot3 max linear (m/s)
         self.max_yaw_rate  = 1.5    # TurtleBot3 max angular (rad/s)
         self.max_accel     = 0.8    # m/s²
-        self.max_delta_yaw = 2.2    # rad/s²
+        # max_delta_yaw: set to max_yaw_rate/dt so the full ±w_max range is always
+        # reachable from tick 1, matching the reference planner's unconstrained
+        # angular sampling.  Angular inertia on TurtleBot3 is negligible compared
+        # to linear inertia, so no real dynamic window is needed for ω.
+        self.max_delta_yaw = 15.0   # rad/s²  (= 1.5/0.1) — always covers full ±w_max
         self.dt            = 0.1    # s  — must satisfy max_accel*dt > v_step (0.03)
         self.predict_time  = 3.0    # s
         self.viz_time      = 4.0    # s  — longer arcs for RViz clarity
 
         # ── Cost weights (all terms normalised 0–1 so weights are comparable) ─
-        self.heading_cost_weight   = 0.3
-        self.dist_cost_weight      = 0.3
-        self.obstacle_cost_weight  = 3.0
-        self.clearance_cost_weight = 1.5
-        self.velocity_cost_weight  = 1.3
+        # heading + dist must dominate obstacle so the robot drives toward the
+        # goal rather than detouring around every inflation cell.
+        # Old values caused 10× obstacle dominance → robot curved sideways.
+        # self.heading_cost_weight   = 0.3
+        # self.dist_cost_weight      = 0.3
+        # self.obstacle_cost_weight  = 3.0
+        # self.clearance_cost_weight = 1.5
+        # self.velocity_cost_weight  = 1.3
+        self.heading_cost_weight   = 3.0   # dominant goal-directed pull (~50% of budget)
+        self.dist_cost_weight      = 1.5   # strong distance reduction pull
+        self.obstacle_cost_weight  = 0.5   # hard-reject handles collisions; soft cost kept low
+        self.clearance_cost_weight = 0.3   # secondary — obstacle avg already penalises proximity
+        # velocity_cost = 0: removes bias toward forward motion so pure rotation
+        # trajectories compete on equal footing with curving ones.
+        # self.velocity_cost_weight  = 0.5
+        self.velocity_cost_weight  = 0.2
 
         # ── Velocity window tracker ───────────────────────────────────────────
-        # The simulator odom always reports (0, 0) so we track the last
-        # *commanded* velocity to keep the dynamic window evolving correctly.
+        # use_odom_velocity=true  → dynamic window centred on actual odom velocity
+        # use_odom_velocity=false → dynamic window centred on last commanded velocity
+        #                           (needed in sim where odom always reports 0)
         self._last_cmd_v = 0.0
         self._last_cmd_w = 0.0
+
+        # ── Depth image freshness gate ────────────────────────────────────────
+        # DWA outputs zero velocity when no new depth image has arrived since
+        # the last service call.  Uses a frame counter so clock mismatches
+        # between robot and laptop are irrelevant.
+        self._depth_frame_count        = 0   # incremented on every depth callback
+        self._depth_frame_at_last_call = 0   # value at the previous DWA call
 
         # ── Mode lock per waypoint ────────────────────────────────────────────
         # Mode (DWA vs pure pursuit) is decided once when a new waypoint arrives
@@ -97,11 +121,29 @@ class DWAServiceNode(Node):
         self.declare_parameter('dwa_heading_tol', 0.2)
         self.dwa_heading_tol = self.get_parameter('dwa_heading_tol').value
 
+        # true  → dynamic window from odom velocity (real robot)
+        # false → dynamic window from last commanded velocity (sim)
+        self.declare_parameter('use_odom_velocity', True)
+        self._use_odom_velocity = self.get_parameter('use_odom_velocity').value
+
+        self.declare_parameter('adaptive_horizon', True)    # clip predict_time to dist/v_max
+        self.declare_parameter('normalize_yaw', True)       # wrap yaw to [-pi,pi] each sim step
+        self._adaptive_horizon = self.get_parameter('adaptive_horizon').value
+        self._normalize_yaw    = self.get_parameter('normalize_yaw').value
+
+        self.declare_parameter('use_depth_gate', True)     # false disables camera-stall check
+        self._use_depth_gate = self.get_parameter('use_depth_gate').value
+
+        self.declare_parameter('depth_image_topic', '/turtlebot/camera/depth/image_cropped')
+        depth_topic = self.get_parameter('depth_image_topic').value
+
         # ── Publishers / subscribers ─────────────────────────────────────────
         self.marker_pub = self.create_publisher(MarkerArray, '/dwa_trajectories', 10)
         self.create_subscription(Odometry, '/turtlebot/odom', self._odom_cb, 10)
         self.create_subscription(OccupancyGrid, map_topic, self._map_cb, 10)
-        self.get_logger().info(f'DWA costmap topic: {map_topic}')
+        self.create_subscription(Image, depth_topic, self._depth_cb, 1)
+        self.get_logger().info(
+            f'DWA costmap topic: {map_topic}  depth gate: {depth_topic}')
 
         # ── Service server ───────────────────────────────────────────────────
         self.create_service(
@@ -123,6 +165,9 @@ class DWAServiceNode(Node):
     def _map_cb(self, msg):
         self.grid_map = msg
 
+    def _depth_cb(self, _msg: Image):
+        self._depth_frame_count += 1
+
     # =========================================================================
     # SERVICE HANDLER
     # =========================================================================
@@ -132,13 +177,39 @@ class DWAServiceNode(Node):
             response.success = False
             return response
 
+        # ── Depth image freshness gate ────────────────────────────────────────
+        # Clock-independent: compare frame count at this call vs last call.
+        # If no new frame arrived, the camera has stalled — hold the robot.
+        # Disabled in simulation via use_depth_gate=false.
+        if self._use_depth_gate:
+            if self._depth_frame_count == 0:
+                self.get_logger().warn(
+                    '[DEPTH-GATE] No depth image received yet — holding robot.',
+                    throttle_duration_sec=3.0)
+                response.linear_x  = 0.0
+                response.angular_z = 0.0
+                response.success   = True
+                return response
+            if self._depth_frame_count == self._depth_frame_at_last_call:
+                self.get_logger().warn(
+                    '[DEPTH-GATE] No new depth frame since last call — holding robot.',
+                    throttle_duration_sec=2.0)
+                response.linear_x  = 0.0
+                response.angular_z = 0.0
+                response.success   = True
+                return response
+            self._depth_frame_at_last_call = self._depth_frame_count
+
         goal_x, goal_y = request.goal_x, request.goal_y
 
         # ── New waypoint detected ─────────────────────────────────────────────
         new_goal = (goal_x, goal_y)
         if new_goal != self._current_goal:
             self._current_goal    = new_goal
-            self._dwa_aligning    = True   # always align yaw before DWA
+            # Yaw alignment for the first waypoint of a new path is handled in
+            # path_planner_tb before DWA is called, so _dwa_aligning is NOT set
+            # here.  Intermediate waypoints of the same path go straight to DWA.
+            # self._dwa_aligning    = True
             self._in_escape_sweep = False
             self._escape_phase    = 0
             self._escape_ref_yaw  = None
@@ -146,7 +217,7 @@ class DWAServiceNode(Node):
                 goal_x - self.robot_pose.x, goal_y - self.robot_pose.y)
             self.get_logger().info(
                 f'[MODE] New waypoint ({goal_x:.2f},{goal_y:.2f})  '
-                f'dist={dist_at_arrival:.3f}m  → DWA (aligning first)')
+                f'dist={dist_at_arrival:.3f}m  → DWA directly')
 
         # ── Pure pursuit mode (disabled — kept for reference) ─────────────────
         # if self._use_pure_pursuit:
@@ -174,11 +245,9 @@ class DWAServiceNode(Node):
                 response.success   = True
                 return response
             self._dwa_aligning = False
-            # Reset window tracker so DWA starts with a clean velocity window.
-            # Without this, stale _last_cmd_w from the previous waypoint biases
-            # the dynamic window into a forced turn, causing the robot to circle.
-            self._last_cmd_v = 0.0
-            self._last_cmd_w = 0.0
+            if not self._use_odom_velocity:
+                self._last_cmd_v = 0.0
+                self._last_cmd_w = 0.0
             self.get_logger().info('[DWA-ALIGN] aligned — handing off to DWA')
 
         # ── Escape sweep mode ─────────────────────────────────────────────────
@@ -192,8 +261,9 @@ class DWAServiceNode(Node):
                     self._in_escape_sweep = False
                     self._escape_phase    = 0
                     self._escape_ref_yaw  = None
-                    self._last_cmd_v      = v
-                    self._last_cmd_w      = w
+                    if not self._use_odom_velocity:
+                        self._last_cmd_v = v
+                        self._last_cmd_w = w
                     self._publish_paths(paths, v, w)
                 else:
                     self.get_logger().warn(
@@ -216,8 +286,9 @@ class DWAServiceNode(Node):
             v, w = self._escape_sweep_step()
         else:
             # Only update window tracker on normal DWA (not escape velocities).
-            self._last_cmd_v = v
-            self._last_cmd_w = w
+            if not self._use_odom_velocity:
+                self._last_cmd_v = v
+                self._last_cmd_w = w
 
         # Dead zone compensation for real robot (no-op when deadzone == 0.0).
         if self.vel_deadzone_linear > 0.0 and 0.0 < v < self.vel_deadzone_linear:
@@ -337,8 +408,12 @@ class DWAServiceNode(Node):
     # =========================================================================
 
     def _dynamic_window(self):
-        v = self._last_cmd_v
-        w = self._last_cmd_w
+        if self._use_odom_velocity:
+            v = self.current_vel[0]
+            w = self.current_vel[1]
+        else:
+            v = self._last_cmd_v
+            w = self._last_cmd_w
         v_min = max(0.0,              v - self.max_accel     * self.dt)
         v_max = min(self.max_speed,   v + self.max_accel     * self.dt)
         w_min = max(-self.max_yaw_rate, w - self.max_delta_yaw * self.dt)
@@ -353,7 +428,11 @@ class DWAServiceNode(Node):
         for _ in range(max(1, int(horizon / self.dt))):
             x   += v * math.cos(yaw) * self.dt
             y   += v * math.sin(yaw) * self.dt
-            yaw += w * self.dt
+            if self._normalize_yaw:
+                yaw = math.atan2(math.sin(yaw + w * self.dt),
+                                 math.cos(yaw + w * self.dt))
+            else:
+                yaw += w * self.dt
             traj.append((x, y, yaw))
         return traj
 
@@ -362,10 +441,11 @@ class DWAServiceNode(Node):
             goal_x - self.robot_pose.x, goal_y - self.robot_pose.y)
         init_dist = max(dist_to_goal, 0.1)
 
-        # Clip planning horizon so trajectories never overshoot the waypoint
-        # into unknown space, which would make every trajectory return obs=inf.
-        horizon = max(0.5, min(self.predict_time,
-                               dist_to_goal / max(self.max_speed, 0.01)))
+        if self._adaptive_horizon:
+            horizon = max(0.5, min(self.predict_time,
+                                   dist_to_goal / max(self.max_speed, 0.01)))
+        else:
+            horizon = self.predict_time
 
         v_min, v_max, w_min, w_max = self._dynamic_window()
 

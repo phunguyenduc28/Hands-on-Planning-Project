@@ -96,9 +96,9 @@ def generate_launch_description():
 
         Node(
             package='localization',
-            executable='localization',
+            executable='localization_sim',
             name='differential_drive_ekf',
-            # output='screen',
+            output='screen',
             parameters=[{
                 'odom_frame': 'world_enu',
                 'base_frame': PathJoinSubstitution([LaunchConfiguration('robot_name'), 'base_footprint']),

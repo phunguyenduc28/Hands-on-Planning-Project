@@ -3,10 +3,12 @@ from rclpy.node import Node
 import numpy as np
 import math
 import copy
+import time
 
 from geometry_msgs.msg import Point, PoseStamped, Twist
 from std_msgs.msg import Bool
 from nav_msgs.msg import Odometry, OccupancyGrid
+from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker, MarkerArray
 
 from online_motion_planning.bidirectional_rrt_star import BIRRT_STAR
@@ -56,6 +58,33 @@ class PathPlannerNode(Node):
         self.acceptance_radius = self.get_parameter('acceptance_radius').value
         self.declare_parameter('scan_distance_threshold', 0.4)
         self.scan_distance_threshold = self.get_parameter('scan_distance_threshold').value
+
+        # Stuck detection during the 'moving' phase only.
+        # Two complementary triggers:
+        #   1. Timeout  — distance to waypoint hasn't improved by
+        #                 stuck_progress_threshold (m) for stuck_timeout_sec (s).
+        #                 Catches slow creeping / circular motion.
+        #   2. Regression — distance has grown more than stuck_regression_threshold (m)
+        #                   above the entry distance recorded on the first tick toward
+        #                   this waypoint.  Catches a wall actively pushing the robot
+        #                   backward without waiting for the full timeout.
+        self.declare_parameter('stuck_timeout_sec', 20.0)
+        self.stuck_timeout_sec = self.get_parameter('stuck_timeout_sec').value
+        self.declare_parameter('stuck_progress_threshold', 0.05)
+        self.stuck_progress_threshold = self.get_parameter('stuck_progress_threshold').value
+        self.declare_parameter('stuck_regression_threshold', 0.35)
+        self.stuck_regression_threshold = self.get_parameter('stuck_regression_threshold').value
+        self._min_dist_to_wp   = float('inf')
+        self._entry_dist_to_wp = float('inf')
+        self._last_progress_t  = None
+
+        # Yaw alignment for the first waypoint of each new path.
+        # Set True when BiRRT* produces fresh waypoints; cleared once the robot
+        # is aligned.  Subsequent waypoints in the same path go straight to DWA.
+        self._new_path_first_wp = False
+        self.declare_parameter('yaw_align_tol', 0.2)   # rad (~11°)
+        self._yaw_align_tol = self.get_parameter('yaw_align_tol').value
+
         self.max_linear_velocity = 0.3
         self.declare_parameter('spin_speed', 0.3)
         self.max_angular_velocity = self.get_parameter('spin_speed').value
@@ -69,9 +98,9 @@ class PathPlannerNode(Node):
         self.height = None
         self.width = None
 
-        # Latch set True only when RTAB-Map publishes a real /map update
-        # (not the /map_fast republisher).  Used to pause at each waypoint
-        # until the map is genuinely fresh before deciding scan/move.
+        # Latch set True only when the map-update topic fires.
+        # Topic is /map_scan on real robot, /map in simulation (no map_scan there).
+        # Configured via map_update_topic parameter.
         self._rtab_map_latch = False
 
         self.declare_parameter('map_frame', 'world_enu')
@@ -82,6 +111,13 @@ class PathPlannerNode(Node):
         # arm_is_retracted starts True on real robot (no arm node running),
         # False on sim (arm_retract_node will flip it once the arm is safe).
         self.arm_is_retracted = not is_sim
+
+        # Map-update topic that fires the between-waypoint latch.
+        # Real robot: /map_scan (scan-based occupancy grid)
+        # Simulation:  /map    (RTAB-Map direct output — no map_scan in sim)
+        default_map_update = '/map' if is_sim else '/map_scan'
+        self.declare_parameter('map_update_topic', default_map_update)
+        self._map_update_topic = self.get_parameter('map_update_topic').value
 
         # ── Planning state ───────────────────────────────────────────────────
         self.goal_pose = None       # [x, y] in world metres
@@ -124,6 +160,29 @@ class PathPlannerNode(Node):
         self.rotation_state = 'idle'
         # Allow one re-check after the terminal spin before permanently halting.
         self._post_spin_checked = False
+
+        # ── Return-to-start recovery ─────────────────────────────────────────
+        # After the re-check spin finds nothing, the robot navigates back to its
+        # starting pose, does one more 360° scan, and triggers a final frontier
+        # search.  If that also finds nothing → halt permanently.
+        # Set enable_return_to_start=false to skip this and halt immediately.
+        self.declare_parameter('enable_return_to_start', True)
+        self._enable_return_to_start = self.get_parameter('enable_return_to_start').value
+        self._start_pose            = None   # saved on first odom message
+        self._returning_to_start    = False  # True while navigating back
+        self._has_returned_to_start = False  # True once return trip is done
+        self._return_spin_flag      = False  # True during the return-to-start scan spin
+
+        # ── Depth image gate for 360° spins ──────────────────────────────────
+        # Set spin_depth_gate=true to pause spinning when no new depth frame
+        # has arrived since the previous spin tick (frame-count based, same
+        # approach as control_tb.py — clock-independent).  Set false to disable.
+        self.declare_parameter('spin_depth_gate',  True)
+        self.declare_parameter('spin_depth_topic',
+                               '/turtlebot/camera/depth/image_cropped')
+        self._spin_depth_gate           = self.get_parameter('spin_depth_gate').value
+        self._depth_frame_count         = 0   # incremented on every depth frame
+        self._depth_frame_at_last_spin  = 0   # value at the previous spin tick
         self.prev_yaw_for_spin = None
         self.spin_accumulated = 0.0
         self.last_scan_pos = None
@@ -147,6 +206,7 @@ class PathPlannerNode(Node):
             Bool, '/frontier/trigger', 10)
         self.goal_reached_pub = self.create_publisher(
             PoseStamped, '/frontier/goal_reached', 10)
+        self._dwa_was_ready = None   # tracks DWA availability to log transitions once
 
         # ── Subscribers ──────────────────────────────────────────────────────
         self.create_subscription(
@@ -160,10 +220,16 @@ class PathPlannerNode(Node):
             self._exploration_complete_cb, 10)
         self.create_subscription(
             Bool, '/arm/is_retracted', self._arm_retracted_cb, 10)
-        # Subscribes to raw RTAB-Map /map ONLY to fire the latch — map data
-        # itself is not used here; all planning uses /inflated_map via /map_fast.
+        # Subscribes to map_update_topic to fire the latch after each waypoint.
+        # /map_scan on real robot, /map in simulation (set via map_update_topic param).
         self.create_subscription(
-            OccupancyGrid, '/map', self._rtab_map_direct_cb, 10)
+            OccupancyGrid, self._map_update_topic, self._rtab_map_direct_cb, 10)
+        self.get_logger().info(f'[MAP-WAIT] map update topic: {self._map_update_topic}')
+        spin_depth_topic = self.get_parameter('spin_depth_topic').value
+        self.create_subscription(
+            Image, spin_depth_topic, self._spin_depth_cb, 1)
+        self.get_logger().info(
+            f'Spin depth gate: {spin_depth_topic}')
 
         # ── Timers ───────────────────────────────────────────────────────────
         self.control_timer = self.create_timer(0.1, self.control_loop)   # 10 Hz
@@ -180,6 +246,11 @@ class PathPlannerNode(Node):
         self.current_yaw = math.atan2(
             2 * (q.w * q.z + q.x * q.y),
             1 - 2 * (q.y * q.y + q.z * q.z))
+        if self._start_pose is None:
+            self._start_pose = (self.robot_pose.x, self.robot_pose.y)
+            self.get_logger().info(
+                f'[START] Start pose recorded: '
+                f'({self._start_pose[0]:.2f},{self._start_pose[1]:.2f})')
 
     def _map_cb(self, msg):
         info = msg.info
@@ -211,7 +282,29 @@ class PathPlannerNode(Node):
         if self.waypoints is not None and len(self.waypoints) > 0:
             self.following_last_path = True
             self.get_logger().info('Following last path, then spinning 360°')
+        elif self._post_spin_checked:
+            # Already done the terminal spin + re-check — don't spin again.
+            if (self._enable_return_to_start
+                    and not self._has_returned_to_start
+                    and self._start_pose is not None):
+                self._returning_to_start    = True
+                self._has_returned_to_start = True
+                self.exploration_done  = False
+                self.following_last_path = False
+                self.goal_pose         = list(self._start_pose)
+                self.complete_a_path   = True
+                self.rotation_state    = 'idle'
+                self.get_logger().info(
+                    f'[RETURN] Exploration complete (post-spin) — returning to start '
+                    f'({self._start_pose[0]:.2f},{self._start_pose[1]:.2f})')
+            else:
+                self.exploration_done = True
+                self.rotation_state = 'halted'
+                self.get_logger().info(
+                    '[RETURN] Exploration complete — halting'
+                    + (' (return_to_start disabled)' if not self._enable_return_to_start else ''))
         else:
+            # First time — do the terminal spin.
             self.rotation_state = 'spinning_360'
             self.prev_yaw_for_spin = None
             self.spin_accumulated = 0.0
@@ -223,6 +316,9 @@ class PathPlannerNode(Node):
         """Fires only when RTAB-Map publishes a genuine /map update (not /map_fast).
         Sets the latch so the planner knows fresh map data is available."""
         self._rtab_map_latch = True
+
+    def _spin_depth_cb(self, _msg: Image):
+        self._depth_frame_count += 1
 
     # ── Helper utilities ─────────────────────────────────────────────────────
 
@@ -381,6 +477,9 @@ class PathPlannerNode(Node):
         self.trigger_pub.publish(msg)
 
     def _notify_goal_reached(self, goal_x, goal_y):
+        self.get_logger().info(
+            f'[GOAL-REACHED] Notifying frontier node: ({goal_x:.2f},{goal_y:.2f}) '
+            '— position blacklisted within visited_frontier_radius_m')
         msg = PoseStamped()
         msg.header.frame_id = self.binary_map_frame
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -410,6 +509,7 @@ class PathPlannerNode(Node):
         self.rrt_fail_count = 0
         self.max_iterations = self.max_iterations_base
         self._dwa_future = None
+        self._new_path_first_wp = False
         self.cmd_vel_pub.publish(Twist())
 
         self.consecutive_rejections += 1
@@ -444,18 +544,46 @@ class PathPlannerNode(Node):
         elapsed = (self.get_clock().now()
                    - self._last_trigger_time).nanoseconds / 1e9
         if elapsed > self.goal_timeout_sec:
-            self.get_logger().info(
-                f'No frontier goal in {elapsed:.1f} s — '
-                'all remaining frontiers below area threshold, '
-                'starting final 360° spin')
-            self.exploration_done = True
             self._last_trigger_time = None
             self.goal_pose = None
             self.waypoints = None
             self.cmd_vel_pub.publish(Twist())
-            self.rotation_state = 'spinning_360'
-            self.prev_yaw_for_spin = None
-            self.spin_accumulated = 0.0
+
+            if self._post_spin_checked:
+                # Re-check spin already done — skip second spin.
+                if (self._enable_return_to_start
+                        and not self._has_returned_to_start
+                        and self._start_pose is not None):
+                    # Navigate back to start for one final scan.
+                    self._returning_to_start    = True
+                    self._has_returned_to_start = True
+                    self.exploration_done  = False
+                    self.following_last_path = False
+                    self.goal_pose         = list(self._start_pose)
+                    self.complete_a_path   = True
+                    self.rotation_state    = 'idle'
+                    self.get_logger().info(
+                        f'[RETURN] Re-check found nothing — returning to start '
+                        f'({self._start_pose[0]:.2f},{self._start_pose[1]:.2f}) '
+                        'for one final scan')
+                else:
+                    # Already returned, disabled, or no start pose — halt.
+                    self.exploration_done = True
+                    self.rotation_state = 'halted'
+                    self.get_logger().info(
+                        '[RETURN] Halting'
+                        + (' (return_to_start disabled)' if not self._enable_return_to_start else
+                           ' — no frontiers after return-to-start'))
+            else:
+                # First time out — do the terminal spin + re-check.
+                self.get_logger().info(
+                    f'No frontier goal in {elapsed:.1f} s — '
+                    'all remaining frontiers below area threshold, '
+                    'starting final 360° spin')
+                self.exploration_done = True
+                self.rotation_state = 'spinning_360'
+                self.prev_yaw_for_spin = None
+                self.spin_accumulated = 0.0
 
     # ── Path planning loop (1 Hz) ─────────────────────────────────────────────
 
@@ -500,6 +628,9 @@ class PathPlannerNode(Node):
             return
 
         if self.goal_pose is None:
+            self.get_logger().info(
+                'Waiting for frontier goal...',
+                throttle_duration_sec=10.0)
             return
 
         # ── Convert world coordinates to map cells ────────────────────────────
@@ -617,6 +748,7 @@ class PathPlannerNode(Node):
 
             if waypoints:
                 self.waypoints = waypoints
+                self._new_path_first_wp = True   # align yaw before first DWA call
                 viz_pts = ([np.array([self.robot_pose.x, self.robot_pose.y])]
                            + waypoints)
                 self.publish_positions_as_markers(viz_pts)
@@ -639,12 +771,12 @@ class PathPlannerNode(Node):
             self._do_spin()
             return
 
-        # ── Waiting for a genuine RTAB-Map update before moving on ───────────
+        # ── Waiting for a fresh map update before moving on ──────────────────
         if self.rotation_state == 'waiting_map':
             self.cmd_vel_pub.publish(Twist())
             if not self._rtab_map_latch:
                 self.get_logger().info(
-                    '[MAP-WAIT] Stopped — waiting for RTAB-Map to publish an update...',
+                    f'[MAP-WAIT] Stopped — waiting for {self._map_update_topic} to publish an update...',
                     throttle_duration_sec=3.0)
                 return
             # Map arrived — clear latch and decide: scan or move
@@ -677,6 +809,9 @@ class PathPlannerNode(Node):
         # ── Wait for arm_retract_node before base moves (sim only) ────────────
         if not self.arm_is_retracted:
             self.cmd_vel_pub.publish(Twist())
+            self.get_logger().info(
+                'Waiting for arm retraction before moving...',
+                throttle_duration_sec=3.0)
             return
 
         self.complete_a_path = False
@@ -698,6 +833,9 @@ class PathPlannerNode(Node):
                     f'pos=({robot_pos[0]:.2f},{robot_pos[1]:.2f})')
             else:
                 self.rotation_state = 'moving'
+                self.get_logger().info(
+                    f'[IDLE→MOVE] Skipping scan — within scan_distance_threshold '
+                    f'({self.scan_distance_threshold}m) of last scan. Moving directly.')
 
         if self.rotation_state == 'scanning_360':
             self._do_scan_360()
@@ -707,8 +845,25 @@ class PathPlannerNode(Node):
             self._handle_moving(next_waypoint)
 
     def _do_spin(self):
-        """Execute a terminal 360° spin; transition to 'halted' when done."""
+        """Execute a 360° spin — either terminal exploration or return-to-start scan."""
+        if self._spin_depth_gate:
+            if self._depth_frame_count == 0:
+                self.cmd_vel_pub.publish(Twist())
+                self.get_logger().warn(
+                    '[SPIN] No depth image received yet — holding.',
+                    throttle_duration_sec=2.0)
+                return
+            if self._depth_frame_count == self._depth_frame_at_last_spin:
+                self.cmd_vel_pub.publish(Twist())
+                self.get_logger().warn(
+                    '[SPIN] No new depth frame since last tick — holding.',
+                    throttle_duration_sec=2.0)
+                return
+            self._depth_frame_at_last_spin = self._depth_frame_count
+
         if self.prev_yaw_for_spin is None:
+            label = 'return-to-start' if self._return_spin_flag else 'terminal'
+            self.get_logger().info(f'[SPIN] Starting {label} 360° spin')
             self.prev_yaw_for_spin = self.current_yaw
             self.spin_accumulated = 0.0
         else:
@@ -721,7 +876,17 @@ class PathPlannerNode(Node):
             self.prev_yaw_for_spin = self.current_yaw
         if self.spin_accumulated >= 2 * math.pi - 0.1:
             self.cmd_vel_pub.publish(Twist())
-            if not self._post_spin_checked:
+
+            if self._return_spin_flag:
+                # Return-to-start scan complete — trigger one final frontier search.
+                self._return_spin_flag = False
+                self.rotation_state = 'idle'
+                self._last_trigger_time = self.get_clock().now()
+                self._trigger_frontier_search()
+                self.get_logger().info(
+                    '[RETURN] Return scan done — triggering final frontier search '
+                    f'(timeout in {self.goal_timeout_sec:.0f}s)')
+            elif not self._post_spin_checked:
                 # First terminal spin done — give frontier detection one more chance.
                 self._post_spin_checked = True
                 self.exploration_done = False
@@ -734,9 +899,11 @@ class PathPlannerNode(Node):
                     '[SPIN] Terminal spin complete — re-checking for frontiers '
                     f'(timeout in {self.goal_timeout_sec:.0f}s)')
             else:
-                # Second spin with no frontier found → truly done.
+                # _timeout_check now intercepts before a second spin can happen,
+                # so this branch is only reached if the re-check got a frontier
+                # but exploration_done was re-set.  Safe fallback: halt.
                 self.rotation_state = 'halted'
-                self.get_logger().info('[SPIN] No new frontiers after re-check — halted')
+                self.get_logger().info('[SPIN] Fallback halt after unexpected second spin')
         else:
             cmd = Twist()
             cmd.angular.z = self.max_angular_velocity
@@ -744,6 +911,21 @@ class PathPlannerNode(Node):
 
     def _do_scan_360(self):
         """Scan 360° at current waypoint; transition to 'moving' when done."""
+        if self._spin_depth_gate:
+            if self._depth_frame_count == 0:
+                self.cmd_vel_pub.publish(Twist())
+                self.get_logger().warn(
+                    '[SCAN] No depth image received yet — holding.',
+                    throttle_duration_sec=2.0)
+                return
+            if self._depth_frame_count == self._depth_frame_at_last_spin:
+                self.cmd_vel_pub.publish(Twist())
+                self.get_logger().warn(
+                    '[SCAN] No new depth frame since last tick — holding.',
+                    throttle_duration_sec=2.0)
+                return
+            self._depth_frame_at_last_spin = self._depth_frame_count
+
         if self.prev_yaw_for_spin is None:
             self.prev_yaw_for_spin = self.current_yaw
             self.spin_accumulated = 0.0
@@ -778,8 +960,105 @@ class PathPlannerNode(Node):
         inc_y = next_waypoint[1] - self.robot_pose.y
         dist = math.hypot(inc_x, inc_y)
 
+        # ── Yaw alignment — first waypoint of a new path only ──────────────────
+        # Aligns the robot to face the first waypoint before DWA takes control.
+        # _new_path_first_wp is set True each time BiRRT* produces fresh waypoints
+        # and cleared here once alignment is done.  Intermediate waypoints of the
+        # same path skip this block entirely and go straight to DWA.
+        if self._new_path_first_wp:
+            goal_angle = math.atan2(inc_y, inc_x)
+            alpha = math.atan2(
+                math.sin(goal_angle - self.current_yaw),
+                math.cos(goal_angle - self.current_yaw))
+            if abs(alpha) > self._yaw_align_tol:
+                w = math.copysign(
+                    min(self.max_angular_velocity, 1.5 * abs(alpha)), alpha)
+                self.get_logger().info(
+                    f'[YAW-ALIGN] α={math.degrees(alpha):.1f}°  '
+                    f'tol={math.degrees(self._yaw_align_tol):.1f}°  w={w:.3f}',
+                    throttle_duration_sec=0.5)
+                cmd = Twist()
+                cmd.angular.z = w
+                self.cmd_vel_pub.publish(cmd)
+                return
+            # Aligned — clear flag and reset stuck clock so it starts fresh
+            self._new_path_first_wp = False
+            self._last_progress_t   = None
+            self._min_dist_to_wp    = float('inf')
+            self._entry_dist_to_wp  = float('inf')
+            self.get_logger().info(
+                f'[YAW-ALIGN] Done — handing off to DWA  '
+                f'wp=({next_waypoint[0]:.2f},{next_waypoint[1]:.2f})  '
+                f'dist={dist:.2f}m')
+
+        # ── Progress tracking (stuck detection) ───────────────────────────────
+        now = self.get_clock().now()
+        if self._last_progress_t is None:
+            # First tick toward this waypoint — record entry distance and start clock.
+            self._entry_dist_to_wp = dist
+            self._min_dist_to_wp   = dist
+            self._last_progress_t  = now
+            self.get_logger().info(
+                f'[STUCK-TRACK] New waypoint approach started  '
+                f'entry_dist={dist:.2f}m  '
+                f'regression_limit={self.stuck_regression_threshold:.2f}m  '
+                f'timeout={self.stuck_timeout_sec:.0f}s  '
+                f'progress_threshold={self.stuck_progress_threshold:.3f}m')
+        elif dist < self._min_dist_to_wp - self.stuck_progress_threshold:
+            # Robot set a new best distance — genuine progress, reset the clock.
+            improvement = self._min_dist_to_wp - dist
+            self.get_logger().info(
+                f'[STUCK-TRACK] Progress: {self._min_dist_to_wp:.2f}m → {dist:.2f}m  '
+                f'(improved {improvement:.3f}m > threshold {self.stuck_progress_threshold:.3f}m) '
+                f'— clock reset',
+                throttle_duration_sec=2.0)
+            self._min_dist_to_wp  = dist
+            self._last_progress_t = now
+        else:
+            elapsed = (now - self._last_progress_t).nanoseconds / 1e9
+            regression = dist - self._entry_dist_to_wp
+
+            # Regression trigger: wall is actively pushing robot backward
+            if regression > self.stuck_regression_threshold:
+                self.get_logger().warn(
+                    f'[STUCK-REGRESSION] Fired after {elapsed:.1f}s  '
+                    f'regression={regression:.2f}m > limit={self.stuck_regression_threshold:.2f}m  '
+                    f'(entry={self._entry_dist_to_wp:.2f}m  now={dist:.2f}m)  '
+                    f'best_ever={self._min_dist_to_wp:.2f}m  '
+                    f'→ raise stuck_regression_threshold if this was a valid detour')
+                self._entry_dist_to_wp = float('inf')
+                self._min_dist_to_wp   = float('inf')
+                self._last_progress_t  = None
+                self._reject_goal('stuck — waypoint regression')
+                return
+
+            # Timeout trigger: robot crept / circled without closing on waypoint
+            if elapsed > self.stuck_timeout_sec:
+                self.get_logger().warn(
+                    f'[STUCK-TIMEOUT] Fired after {elapsed:.1f}s > limit={self.stuck_timeout_sec:.0f}s  '
+                    f'best_ever={self._min_dist_to_wp:.2f}m  regression={regression:+.2f}m  '
+                    f'progress_threshold={self.stuck_progress_threshold:.3f}m  '
+                    f'→ lower stuck_timeout_sec if this is too slow to detect; '
+                    f'raise if legitimate slow approach keeps firing')
+                self._entry_dist_to_wp = float('inf')
+                self._min_dist_to_wp   = float('inf')
+                self._last_progress_t  = None
+                self._reject_goal('stuck — no waypoint progress')
+                return
+
+            # Neither trigger yet — log how close we are to each limit
+            self.get_logger().info(
+                f'[STUCK-TRACK] Waiting for progress  '
+                f'elapsed={elapsed:.1f}/{self.stuck_timeout_sec:.0f}s  '
+                f'regression={regression:+.2f}/{self.stuck_regression_threshold:.2f}m  '
+                f'dist={dist:.2f}m  best={self._min_dist_to_wp:.2f}m',
+                throttle_duration_sec=4.0)
+
         # ── Waypoint reached ──────────────────────────────────────────────────
         if dist < self.acceptance_radius:
+            self._entry_dist_to_wp = float('inf')   # reset for next waypoint
+            self._min_dist_to_wp   = float('inf')
+            self._last_progress_t  = None
             self.waypoints.pop(0)
             self.cmd_vel_pub.publish(Twist())
 
@@ -797,12 +1076,25 @@ class PathPlannerNode(Node):
                     self.prev_yaw_for_spin = None
                     self.spin_accumulated = 0.0
                 else:
-                    if reached_goal is not None:
-                        self._notify_goal_reached(
-                            reached_goal[0], reached_goal[1])
-                    self.consecutive_rejections = 0   # success resets counter
-                    self.get_logger().info(
-                        'All waypoints reached — scanning 360° to discover new frontiers')
+                    if self._returning_to_start:
+                        # Arrived at start — do a 360° scan using spinning_360 (not
+                        # scanning_360) so it runs BEFORE the no-waypoints check
+                        # that would overwrite scanning_360 → idle.
+                        self._returning_to_start = False
+                        self._return_spin_flag   = True
+                        self.rotation_state      = 'spinning_360'
+                        self.prev_yaw_for_spin   = None
+                        self.spin_accumulated    = 0.0
+                        self.get_logger().info(
+                            '[RETURN] Back at start — doing final 360° scan')
+                        return
+                    else:
+                        if reached_goal is not None:
+                            self._notify_goal_reached(
+                                reached_goal[0], reached_goal[1])
+                        self.consecutive_rejections = 0   # success resets counter
+                        self.get_logger().info(
+                            'All waypoints reached — scanning 360° to discover new frontiers')
                     self.rotation_state = 'scanning_360'
                     self.prev_yaw_for_spin = None
                     self.spin_accumulated = 0.0
@@ -820,6 +1112,15 @@ class PathPlannerNode(Node):
             self.rotation_state = 'waiting_map'
             return
 
+        # ── Periodic progress log ─────────────────────────────────────────────
+        self.get_logger().info(
+            f'[MOVING] wp=({next_waypoint[0]:.2f},{next_waypoint[1]:.2f})  '
+            f'dist={dist:.2f}m  best={self._min_dist_to_wp:.2f}m  '
+            f'entry={self._entry_dist_to_wp:.2f}m  '
+            f'regression={dist - self._entry_dist_to_wp:+.2f}m  '
+            f'remaining={len(self.waypoints)}wp',
+            throttle_duration_sec=3.0)
+
         # ── Drive toward waypoint via DWA (or pure-pursuit fallback) ─────────
         self._move_with_dwa_or_pursuit(next_waypoint, inc_x, inc_y)
 
@@ -833,6 +1134,10 @@ class PathPlannerNode(Node):
         pure-pursuit if the DWA service is not running.
         """
         if self._dwa_client.service_is_ready():
+            if self._dwa_was_ready is not True:
+                self.get_logger().info('[CONTROLLER] DWA service available — using DWA')
+                self._dwa_was_ready = True
+
             # Apply the previous response if ready
             if self._dwa_future is not None and self._dwa_future.done():
                 try:
@@ -842,6 +1147,13 @@ class PathPlannerNode(Node):
                         cmd.linear.x = resp.linear_x
                         cmd.angular.z = resp.angular_z
                         self.cmd_vel_pub.publish(cmd)
+                        self.get_logger().info(
+                            f'[DWA] v={resp.linear_x:.3f}m/s  ω={resp.angular_z:.3f}rad/s',
+                            throttle_duration_sec=2.0)
+                    else:
+                        self.get_logger().warn(
+                            '[DWA] Service returned success=False',
+                            throttle_duration_sec=2.0)
                 except Exception as e:
                     self.get_logger().error(f'DWA service error: {e}')
                 self._dwa_future = None
@@ -853,6 +1165,11 @@ class PathPlannerNode(Node):
                 req.goal_y = float(waypoint[1])
                 self._dwa_future = self._dwa_client.call_async(req)
         else:
+            if self._dwa_was_ready is not False:
+                self.get_logger().warn(
+                    '[CONTROLLER] DWA service unavailable — falling back to pure-pursuit')
+                self._dwa_was_ready = False
+
             # Pure-pursuit fallback when DWA service is unavailable
             desired_yaw = math.atan2(inc_y, inc_x)
             angle_diff = self.normalize_angle(desired_yaw - self.current_yaw)
@@ -862,6 +1179,10 @@ class PathPlannerNode(Node):
             if abs(angle_diff) <= 0.3:
                 cmd.linear.x = min(self.kv * dist, self.max_linear_velocity)
             self.cmd_vel_pub.publish(cmd)
+            self.get_logger().info(
+                f'[PURSUIT] v={cmd.linear.x:.3f}m/s  ω={cmd.angular.z:.3f}rad/s  '
+                f'angle_err={math.degrees(angle_diff):.1f}°',
+                throttle_duration_sec=2.0)
 
 
 def main(args=None):

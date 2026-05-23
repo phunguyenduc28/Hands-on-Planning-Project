@@ -10,6 +10,7 @@ Panels:
         - /RPLidar1
         - /Map1
         - /Odometry1/Shape1
+        - /Map2
         - /MarkerArray2/Namespaces1
         - /MarkerArray3
       Splitter Ratio: 0.5
@@ -283,7 +284,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: costmap
       Draw Behind: true
-      Enabled: true
+      Enabled: false
       Name: Map
       Topic:
         Depth: 5
@@ -299,13 +300,12 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /inflated_map_updates
       Use Timestamp: false
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        links: true
-        positions: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -358,7 +358,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: true
+      Enabled: false
       Name: Map
       Topic:
         Depth: 5
@@ -374,14 +374,12 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /map_updates
       Use Timestamp: false
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        dwa_all: true
-        dwa_best: true
-        dwa_costs: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -393,7 +391,7 @@ Visualization Manager:
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        all_frontiers: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -500,7 +498,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        {}
+        search_area: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -508,6 +506,75 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /frontier_viz/search_area
+      Value: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_scan
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_scan_updates
+      Use Timestamp: false
+      Value: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /inflated_map_scan
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /inflated_map_scan_updates
+      Use Timestamp: false
+      Value: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /inflated_map_dwa
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /inflated_map_dwa_updates
+      Use Timestamp: false
       Value: true
   Enabled: true
   Global Options:
@@ -555,25 +622,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 5.751101970672607
+      Distance: 6.823333263397217
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -1.6846226453781128
-        Y: -0.3451331853866577
-        Z: -0.11150284111499786
+        X: 0.5111613273620605
+        Y: 0.37595024704933167
+        Z: -0.10922781378030777
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.4897962808609009
+      Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.782198905944824
+      Yaw: 3.2821831703186035
     Saved: ~
 Window Geometry:
   Displays:
@@ -594,4 +661,4 @@ Window Geometry:
     collapsed: false
   Width: 1390
   X: 372
-  Y: 451
+  Y: 414

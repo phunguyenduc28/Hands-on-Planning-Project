@@ -3,12 +3,12 @@ ekf_node:
 
     # ── Frame topology ────────────────────────────────────────────────────────
     # map_frame:       world_enu
-    # odom_frame:      world_enu
-    odom_frame:      odom
-    # base_link_frame: turtlebot/base_footprint
-    base_link_frame: base_footprint
-    # world_frame:     world_enu
-    world_frame:     odom
+    odom_frame:      world_enu
+    # odom_frame:      odom
+    base_link_frame: turtlebot/base_footprint
+    # base_link_frame: base_footprint
+    world_frame:     world_enu
+    # world_frame:     odom
 
     # ── Filter settings ───────────────────────────────────────────────────────
     frequency:           30.0   # Hz — how often the filter publishes
@@ -35,7 +35,8 @@ ekf_node:
     # ── IMU source: /turtlebot/sensors/imu_enu (NED→ENU converted) ───────────
     # Raw IMU is world_NED; imu_ned_to_enu negates yaw/omega_z before publishing here.
     # imu0: /turtlebot/sensors/imu_enu
-    imu0: /turtlebot/imu
+    imu0: /turtlebot/sensors/imu_enu
+    # imu0: /turtlebot/imu
     imu0_config: [false, false, false,
                   false, false, true,
                   false, false, false,

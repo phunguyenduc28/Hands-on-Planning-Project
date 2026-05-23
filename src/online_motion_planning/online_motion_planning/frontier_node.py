@@ -59,8 +59,10 @@ class FrontierNode(Node):
         self.rtab_height = None
 
         # ── Frontier scoring weights ─────────────────────────────────────────
-        self.kdist = 1
-        self.karea = 2
+        self.declare_parameter('kdist', 1.0)
+        self.kdist = self.get_parameter('kdist').value
+        self.declare_parameter('karea', 2.0)
+        self.karea = self.get_parameter('karea').value
 
         # ── Search gate: True → run detection on next timer tick ─────────────
         self.find_frontier = True
@@ -69,7 +71,7 @@ class FrontierNode(Node):
         # exploration countdown (max_radius_wait_count) is suppressed until this
         # flag is set so that the "exploration complete" signal is never fired
         # during the map-build startup phase (when the RTAB map has no free
-        # cells yet and every detection tick returns numLabels==1).
+        # cells yet and every de tection tick returns numLabels==1).
         self.frontiers_ever_found = False
 
         # ── Rejection filters ────────────────────────────────────────────────
@@ -78,11 +80,21 @@ class FrontierNode(Node):
         self.visited_frontier_positions = []
         self.declare_parameter('visited_frontier_radius_m', 0.3)
         self.visited_frontier_radius_m = self.get_parameter('visited_frontier_radius_m').value
+        self.declare_parameter('min_frontier_area', 1)
+        self.min_frontier_area = self.get_parameter('min_frontier_area').value
+        self.declare_parameter('min_frontier_dim', 1)
+        self.min_frontier_dim = self.get_parameter('min_frontier_dim').value
+        self.declare_parameter('max_frontier_area', 200)
+        self.max_frontier_area = self.get_parameter('max_frontier_area').value
+        self.declare_parameter('frontier_edge_margin', 3)
+        self.frontier_edge_margin = self.get_parameter('frontier_edge_margin').value
 
         # ── Count-based search-window expansion ──────────────────────────────
         self.frontiers_explored_count = 0
-        self.frontier_expand_every = 3
-        self.frontier_expand_step = 15
+        self.declare_parameter('frontier_expand_every', 3)
+        self.frontier_expand_every = self.get_parameter('frontier_expand_every').value
+        self.declare_parameter('frontier_expand_step', 15)
+        self.frontier_expand_step = self.get_parameter('frontier_expand_step').value
 
         # ── Search window ────────────────────────────────────────────────────
         # use_global_search_window=True: fixed world_enu rectangle (tune bounds below)
@@ -97,12 +109,19 @@ class FrontierNode(Node):
         self.global_y_min = self.get_parameter('global_y_min').value
         self.declare_parameter('global_y_max', 1.0)
         self.global_y_max = self.get_parameter('global_y_max').value
-        self.global_search_count_threshold = 10
+        self.declare_parameter('global_search_count_threshold', 10)
+        self.global_search_count_threshold = self.get_parameter('global_search_count_threshold').value
 
-        self.local_search_radius = 20
-        self.max_local_search_radius = 50
-        self.local_search_count_threshold = 10
+        self.declare_parameter('local_search_radius', 20)
+        self.local_search_radius = self.get_parameter('local_search_radius').value
+        self.declare_parameter('max_local_search_radius', 50)
+        self.max_local_search_radius = self.get_parameter('max_local_search_radius').value
+        self.declare_parameter('local_search_count_threshold', 10)
+        self.local_search_count_threshold = self.get_parameter('local_search_count_threshold').value
         self.max_radius_wait_count = 0
+
+        self.declare_parameter('bfs_max_cells', 10000)
+        self.bfs_max_cells = self.get_parameter('bfs_max_cells').value
 
         # ── Map frame ────────────────────────────────────────────────────────
         self.declare_parameter('map_frame', 'world_enu')
@@ -121,6 +140,8 @@ class FrontierNode(Node):
             MarkerArray, '/frontier_viz/evaluation', 10)
         self.search_area_pub = self.create_publisher(
             Marker, '/frontier_viz/search_area', 10)
+        self.frontier_labels_pub = self.create_publisher(
+            MarkerArray, '/frontier_viz/labels', 10)
 
         # ── Subscribers ──────────────────────────────────────────────────────
         self.create_subscription(
@@ -372,6 +393,45 @@ class FrontierNode(Node):
 
         self.frontier_eval_pub.publish(marker_array)
 
+    def _publish_frontier_labels(self, numLabels, centroids,
+                                 resolution=None, origin=None):
+        """White TEXT_VIEW_FACING markers showing each cluster's index."""
+        if resolution is None:
+            resolution = self.rtab_resolution
+        if origin is None:
+            origin = self.rtab_origin
+
+        marker_array = MarkerArray()
+        now = self.get_clock().now().to_msg()
+        clear = Marker()
+        clear.header.frame_id = self.binary_map_frame
+        clear.header.stamp = now
+        clear.ns = 'frontier_labels'
+        clear.action = Marker.DELETEALL
+        marker_array.markers.append(clear)
+
+        for i in range(1, numLabels):
+            cX, cY = centroids[i]
+            m = Marker()
+            m.header.frame_id = self.binary_map_frame
+            m.header.stamp = now
+            m.ns = 'frontier_labels'
+            m.id = i
+            m.type = Marker.TEXT_VIEW_FACING
+            m.action = Marker.ADD
+            m.pose.position.x = float(cX * resolution + origin[0])
+            m.pose.position.y = float(cY * resolution + origin[1])
+            m.pose.position.z = 0.35
+            m.pose.orientation.w = 1.0
+            m.scale.z = 0.18
+            m.color.r = m.color.g = m.color.b = 1.0
+            m.color.a = 1.0
+            m.text = str(i)
+            m.lifetime = rclpy.duration.Duration(seconds=4).to_msg()
+            marker_array.markers.append(m)
+
+        self.frontier_labels_pub.publish(marker_array)
+
     def _publish_search_area(self, rtab_row_min, rtab_row_max,
                              rtab_col_min, rtab_col_max):
         """White LINE_STRIP rectangle for the local search window."""
@@ -462,7 +522,7 @@ class FrontierNode(Node):
             (anchor_y - self.rtab_origin[1]) / self.rtab_resolution)
 
         SEARCH_RADIUS = self.local_search_radius
-        reachable = self.get_reachable_cells(nav_col, nav_row, max_cells=10000)
+        reachable = self.get_reachable_cells(nav_col, nav_row, max_cells=self.bfs_max_cells)
         self._publish_bfs_cells(reachable)
 
         # ── Window bounds in RTAB-Map cells ──────────────────────────────────
@@ -495,24 +555,81 @@ class FrontierNode(Node):
                 throttle_duration_sec=5.0)
 
         # ── Frontier cell detection on raw RTAB-Map ───────────────────────────
-        # A free cell (0) adjacent to an unknown cell (50) with no occupied
-        # neighbour is a frontier: the robot can see through it into unexplored
-        # space.
+        # Pre-process: fill isolated/scattered unknown cells (50) that sit
+        # within the free region.  Morphological closing on the free mask
+        # absorbs small unknown gaps so they don't generate interior frontier
+        # cells that chain the whole explored area into one giant cluster.
+        # Kernel size controls how large a gap gets filled — tune as needed.
+        free_mask = (self.rtab_map == 0).astype(np.uint8) * 255
+        close_kernel = np.ones((5, 5), np.uint8)
+        free_mask_closed = cv2.morphologyEx(
+            free_mask, cv2.MORPH_CLOSE, close_kernel)
+
+        # A free cell adjacent to an unknown cell (after gap-filling) with no
+        # occupied neighbour is a frontier: the robot can see into unexplored space.
         frontier_cells = np.zeros(
             (self.rtab_height, self.rtab_width), dtype=np.uint8)
         for y in range(rtab_row_min, rtab_row_max):
             for x in range(rtab_col_min, rtab_col_max):
-                if self.rtab_map[y, x] == 0:
-                    neighbors = [
+                if free_mask_closed[y, x] == 255:   # effectively free after closing
+                    neighbors_raw = [
                         self.rtab_map[y - 1, x], self.rtab_map[y + 1, x],
                         self.rtab_map[y, x - 1], self.rtab_map[y, x + 1],
                     ]
-                    if 50.0 in neighbors and 100.0 not in neighbors:
+                    neighbors_closed = [
+                        free_mask_closed[y - 1, x], free_mask_closed[y + 1, x],
+                        free_mask_closed[y, x - 1], free_mask_closed[y, x + 1],
+                    ]
+                    # Frontier only if a neighbour is unknown in the CLOSED map
+                    # (i.e. a real boundary, not just a scattered interior gap)
+                    # and no occupied cell is adjacent in the raw map.
+                    if 0 in neighbors_closed and 100.0 not in neighbors_raw:
                         frontier_cells[y, x] = 255
 
+        # If 4-connectivity still produces overly large clusters (thin bridges
+        # chaining separate regions), uncomment the erosion below to break them:
+        # kernel = np.ones((3, 3), np.uint8)
+        # frontier_cells = cv2.erode(frontier_cells, kernel, iterations=1)
+
         output = cv2.connectedComponentsWithStats(
-            frontier_cells, 8, cv2.CV_32S)
+            frontier_cells, 4, cv2.CV_32S)
         (numLabels, labels, stats, centroids) = output
+
+        # ── Option 3: max cluster size + K-means subdivision ─────────────────
+        # If a cluster is larger than max_cluster_cells pixels, split it into
+        # sub-clusters using K-means.  Useful when the map is sparse and large
+        # connected frontier regions should be treated as separate targets.
+        # To enable: uncomment the block below and set max_cluster_cells.
+        #
+        # max_cluster_cells = 200   # pixels — tune to your map resolution
+        # new_labels   = labels.copy()
+        # new_centroids = list(centroids)
+        # new_stats     = list(stats)
+        # next_label    = numLabels
+        # for lbl in range(1, numLabels):
+        #     area = stats[lbl, cv2.CC_STAT_AREA]
+        #     if area <= max_cluster_cells:
+        #         continue
+        #     # Extract pixel coordinates of this cluster
+        #     pts = np.column_stack(np.where(labels == lbl)).astype(np.float32)
+        #     k   = max(2, int(area // max_cluster_cells))
+        #     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+        #                 10, 1.0)
+        #     _, km_labels, km_centers = cv2.kmeans(
+        #         pts, k, None, criteria, 3, cv2.KMEANS_RANDOM_CENTERS)
+        #     # Re-assign pixels to new sub-cluster labels
+        #     new_labels[labels == lbl] = 0   # clear original label
+        #     for sub in range(k):
+        #         mask = (km_labels.flatten() == sub)
+        #         sub_pts = pts[mask].astype(int)
+        #         for r, c in sub_pts:
+        #             new_labels[r, c] = next_label
+        #         new_centroids.append(km_centers[sub][::-1])  # (col, row)
+        #         new_stats.append(stats[lbl])                 # reuse parent stats
+        #         next_label += 1
+        # labels    = new_labels
+        # centroids = np.array(new_centroids)
+        # numLabels = next_label
 
         # ── Diagnostics: log per-tick stats so failures are easy to trace ─────
         rtab_free_cells = int(np.sum(self.rtab_map == 0))
@@ -528,11 +645,12 @@ class FrontierNode(Node):
         self._publish_all_frontiers(
             labels, numLabels,
             resolution=self.rtab_resolution, origin=self.rtab_origin)
+        self._publish_frontier_labels(
+            numLabels, centroids,
+            resolution=self.rtab_resolution, origin=self.rtab_origin)
 
         # ── Score each cluster ────────────────────────────────────────────────
         cost_list = np.full(numLabels, np.inf)
-        MAX_FRONTIER_AREA = 200
-        EDGE_MARGIN = 3
         evaluated_centroids = []
         best_cost = np.inf
         current_best_world = None
@@ -548,20 +666,36 @@ class FrontierNode(Node):
             area = stats[i, cv2.CC_STAT_AREA]
             (cX, cY) = centroids[i]
 
-            if area < 5:
+            if area < self.min_frontier_area:
                 reject_area += 1
+                self.get_logger().info(
+                    f'[F#{i}] REJECT  reason=too_small  '
+                    f'area={area} < {self.min_frontier_area}')
                 continue
             if min(stats[i, cv2.CC_STAT_WIDTH],
-                   stats[i, cv2.CC_STAT_HEIGHT]) < 3:
+                   stats[i, cv2.CC_STAT_HEIGHT]) < self.min_frontier_dim:
                 reject_shape += 1
+                self.get_logger().info(
+                    f'[F#{i}] REJECT  reason=thin_shape  '
+                    f'w={stats[i, cv2.CC_STAT_WIDTH]} '
+                    f'h={stats[i, cv2.CC_STAT_HEIGHT]} '
+                    f'< {self.min_frontier_dim}')
                 continue
             if not (rtab_col_min <= int(cX) <= rtab_col_max
                     and rtab_row_min <= int(cY) <= rtab_row_max):
                 reject_window += 1
+                self.get_logger().info(
+                    f'[F#{i}] REJECT  reason=outside_search_window  '
+                    f'centroid=({cX:.1f},{cY:.1f}) '
+                    f'window_col=[{rtab_col_min},{rtab_col_max}] '
+                    f'window_row=[{rtab_row_min},{rtab_row_max}]')
                 continue
-            if not (EDGE_MARGIN <= int(cX) < self.rtab_width - EDGE_MARGIN
-                    and EDGE_MARGIN <= int(cY) < self.rtab_height - EDGE_MARGIN):
+            if not (self.frontier_edge_margin <= int(cX) < self.rtab_width - self.frontier_edge_margin
+                    and self.frontier_edge_margin <= int(cY) < self.rtab_height - self.frontier_edge_margin):
                 reject_edge += 1
+                self.get_logger().info(
+                    f'[F#{i}] REJECT  reason=map_edge  '
+                    f'centroid=({cX:.1f},{cY:.1f}) margin={self.frontier_edge_margin}')
                 continue
 
             world_x = cX * self.rtab_resolution + self.rtab_origin[0]
@@ -571,24 +705,47 @@ class FrontierNode(Node):
 
             if (nav_cx, nav_cy) not in reachable:
                 reject_bfs += 1
+                self.get_logger().info(
+                    f'[F#{i}] REJECT  reason=bfs_unreachable  '
+                    f'world=({world_x:.2f},{world_y:.2f})  '
+                    f'nav_cell=({nav_cx},{nav_cy})')
                 continue
 
-            capped_area = min(area, MAX_FRONTIER_AREA)
+            capped_area = min(area, self.max_frontier_area)
             cost = self.frontier_cost(capped_area, nav_cx, nav_cy)
+            robot_dist = math.hypot(
+                world_x - self.robot_pose.x, world_y - self.robot_pose.y)
 
-            if math.hypot(world_x - self.robot_pose.x,
-                          world_y - self.robot_pose.y) < self.min_frontier_dist_m:
+            is_visited = any(math.hypot(world_x - vx, world_y - vy)
+                             < self.visited_frontier_radius_m
+                             for vx, vy in self.visited_frontier_positions)
+
+            if robot_dist < self.min_frontier_dist_m:
                 reject_dist += 1
-                dist_fallback.append((world_x, world_y, cost))
+                if not is_visited:
+                    dist_fallback.append((world_x, world_y, cost))
+                    self.get_logger().info(
+                        f'[F#{i}] REJECT  reason=too_close  '
+                        f'dist={robot_dist:.2f}m < {self.min_frontier_dist_m}m  '
+                        f'world=({world_x:.2f},{world_y:.2f})  added to fallback')
+                else:
+                    self.get_logger().info(
+                        f'[F#{i}] REJECT  reason=too_close+visited  '
+                        f'dist={robot_dist:.2f}m  world=({world_x:.2f},{world_y:.2f})  '
+                        f'skipped from fallback')
                 continue
-            if any(math.hypot(world_x - vx, world_y - vy)
-                   < self.visited_frontier_radius_m
-                   for vx, vy in self.visited_frontier_positions):
+            if is_visited:
                 reject_visited += 1
+                self.get_logger().info(
+                    f'[F#{i}] REJECT  reason=already_visited  '
+                    f'world=({world_x:.2f},{world_y:.2f})')
                 continue
 
             cost_list[i] = cost
             evaluated_centroids.append((world_x, world_y))
+            self.get_logger().info(
+                f'[F#{i}] CANDIDATE  cost={cost:.2f}  area={area}  '
+                f'dist={robot_dist:.2f}m  world=({world_x:.2f},{world_y:.2f})')
             if cost < best_cost:
                 best_cost = cost
                 current_best_world = (world_x, world_y)
@@ -675,8 +832,14 @@ class FrontierNode(Node):
             best_cX, best_cY = centroids[best_index]
             goal_x = best_cX * self.rtab_resolution + self.rtab_origin[0]
             goal_y = best_cY * self.rtab_resolution + self.rtab_origin[1]
+            self.get_logger().info(
+                f'[F#{best_index}] SELECTED  cost={cost_list[best_index]:.2f}  '
+                f'world=({goal_x:.2f},{goal_y:.2f})')
         else:
             goal_x, goal_y = current_best_world
+            self.get_logger().info(
+                f'[SELECTED] world=({goal_x:.2f},{goal_y:.2f})  '
+                f'cost={best_cost:.2f}')
 
         # ── Publish selected frontier goal ────────────────────────────────────
         self.get_logger().info(

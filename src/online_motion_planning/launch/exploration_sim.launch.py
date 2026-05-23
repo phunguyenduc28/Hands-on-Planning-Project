@@ -64,6 +64,7 @@ def generate_launch_description():
         executable='imu_ned_to_enu',
         name='imu_ned_to_enu',
         output='screen',
+        # prefix=xterm('IMU-Converter'),
     )
 
     # ── EKF localisation (robot_localization) ─────────────────────────────
@@ -107,6 +108,7 @@ def generate_launch_description():
         executable='arm_retract_node',
         name='arm_retract_node',
         output='screen',
+        # prefix=xterm('ArmRetract'),
         parameters=[params_file]
     )
 

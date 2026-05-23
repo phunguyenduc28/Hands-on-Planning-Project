@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'occupancy_grid_original = grid_mapping.occupancy_grid_original:main'
+            'occupancy_grid_original = grid_mapping.occupancy_grid_original:main',
+            'scan_map_global = grid_mapping.scan_map_global:main',
         ],
     },
 )
