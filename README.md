@@ -2,7 +2,7 @@
 
 Autonomous exploration of an unknown environment using a **Kobuki TurtleBot 2** with an **Intel RealSense D435i** camera, running in [Stonefish](https://stonefish.readthedocs.io) simulation and deployable on the real robot.
 
-The robot builds a map with **RTAB-Map** (visual SLAM), selects unexplored frontiers, plans collision-free paths with **Bidirectional RRT\***, and executes them using a **Dynamic Window Approach (DWA)** local planner.
+The robot selects unexplored frontiers, plans collision-free paths with **Bidirectional RRT\***, and executes them using a **Dynamic Window Approach (DWA)** local planner. In simulation, **RTAB-Map** handles visual SLAM and occupancy mapping. On the real robot, a lightweight **scan-based occupancy map** (`scan_map_global`) is used instead, built directly from a fake 2D laser scan derived from the depth camera.
 
 **Team:** Haadi / Huy / Phu
 
@@ -10,37 +10,75 @@ The robot builds a map with **RTAB-Map** (visual SLAM), selects unexplored front
 
 ## System Architecture
 
+### Simulation
+
 ```
-┌─────────────────────────── Stonefish Simulator ───────────────────────────┐
-│   RGB image       Depth image       Odometry         IMU (NED)            │
-└───────┬────────────────┬──────────────────┬────────────────┬──────────────┘
-        │                │                  │                │
-  ImageCropNode     ImageCropNode       EKF Node       ImuNedToEnu
-  (color crop)     (depth/scan crop)  (robot_local.)   (NED→ENU)
-        │                │                  ▲                │
-        │          depthimage_to_           │                │
-        │           laserscan              /turtlebot/odom   │
-        │        → /turtlebot/fake_scan     └────────────────┘
-        │                │                  /odometry/filtered
-        └────────────────┴─────────────────────────┬──────────────────────
-                                                    ▼
-                                              RTAB-Map (Visual SLAM)
-                                             RGB-D + fake scan + EKF odom
-                                                    │
-                                                  /map
-                                                    │
-                                         GlobalCostmap (grid_mapping)
-                                          (inflate obstacles 0.2 m)
-                                                    │
-                                             /inflated_map
-                                          ┌──────────┴──────────┐
-                                     FrontierNode         PathPlannerNode
-                                    (BFS + scoring)        (BiRRT* global)
-                                          │                      │
-                                   /frontier_goal  ──────►  DWA Service
-                                                           (local velocity)
-                                                                  │
-                                                       /turtlebot/cmd_vel
+┌──────────────────────────── Stonefish Simulator ──────────────────────────┐
+│   RGB image    Depth image    Odometry    IMU (NED)                       │
+└──────┬──────────────┬──────────────┬────────────┬──────────────────────── ┘
+       │              │              │            │
+  ImageCropNode  ImageCropNode   EKF Node    ImuNedToEnu
+  (color crop)  (scan crop)  (robot_local.)  (NED→ENU)
+       │              │              ▲            │
+       │     depthimage_to_          │            │
+       │      laserscan           /odom    /imu_enu
+       │   → /turtlebot/fake_scan   └────────────┘
+       │              │            /odometry/filtered
+       └──────────────┴──────────────────┬────────────
+                                         ▼
+                                   RTAB-Map (Visual SLAM)
+                               RGB-D + fake scan + EKF odom
+                                    → 3D point cloud + /map
+                                         │
+                                       /map
+                                         │
+                               GlobalCostmap (grid_mapping)
+                               occupancy_grid_original.py
+                               (inflate /map by 0.2 m)
+                                         │
+                                   /inflated_map
+                                ┌────────┴────────┐
+                           FrontierNode     PathPlannerNode
+                          (BFS + scoring)   (BiRRT* global)
+                                │                  │
+                         /frontier_goal ──► DWA Service
+                                          (local velocity)
+                                                   │
+                                        /turtlebot/cmd_vel
+```
+
+### Real Robot
+
+RTAB-Map was not used for planning on the real robot due to timestamp synchronisation issues between the RGB, depth, and scan streams. Instead, `scan_map_global` builds both the raw occupancy map and the inflated costmap in a single node, directly from the fake 2D laser scan produced by `depthimage_to_laserscan`. There is no IMU frame conversion — the real robot's IMU already publishes in ENU.
+
+```
+RealSense D435i
+   └── Depth image
+          │
+     ImageCropNode
+     (scan crop only — top + bottom fraction removed)
+          │
+    /camera/depth/image_scan_cropped
+          │
+   depthimage_to_laserscan
+          │
+   /turtlebot/fake_scan (2D LaserScan)
+          │
+   scan_map_global (grid_mapping)         Kobuki base
+   log-odds ray-casting occupancy map   → /turtlebot/odom
+   publishes /map_scan + /inflated_map_scan  │
+          │                              EKF Node
+          │                         (robot_localization)
+          │                          /odometry/filtered
+          │
+   ┌──────┴───────┐
+FrontierNode  PathPlannerNode
+(BFS + scoring)  (BiRRT* global)
+      │                │
+/frontier_goal ──► DWA Service
+                  (local velocity)
+                        │
+             /turtlebot/cmd_vel
 ```
 
 ---
@@ -54,7 +92,7 @@ The robot builds a map with **RTAB-Map** (visual SLAM), selects unexplored front
 | `online_motion_planning` | Main orchestration: frontier selection, global path planning (BiRRT\*), IMU conversion, arm retraction, launch files |
 | `dwa_planner` | DWA local planner, exposed as a ROS 2 service |
 | `dwa_interfaces` | Custom service definition (`ComputeVelocity.srv`) |
-| `grid_mapping` | Subscribes to `/map`, inflates obstacles, publishes `/inflated_map` |
+| `grid_mapping` | **Sim:** `occupancy_grid_original` subscribes to RTAB-Map's `/map`, inflates it, publishes `/inflated_map`. **Real:** `scan_map_global` builds a full log-odds occupancy map directly from the fake laser scan and publishes both `/map_scan` and `/inflated_map_scan` in one node |
 | `localization` | Custom differential-drive EKF (wheel encoders + IMU) — used on the real robot |
 | `frontier_based_exploration` | Standalone simpler frontier node (legacy; the main pipeline uses `frontier_node` in `online_motion_planning`) |
 
@@ -62,7 +100,7 @@ The robot builds a map with **RTAB-Map** (visual SLAM), selects unexplored front
 
 | Package | Purpose |
 |---------|---------|
-| `image_utils` | Crops RGB and depth images for RTAB-Map; synchronises RTAB-Map input streams |
+| `image_utils` | Crops RGB and depth images. **Sim:** produces both a color crop (→ RTAB-Map) and a depth scan crop (→ `depthimage_to_laserscan`). **Real:** only the depth scan crop is used in the active planning pipeline |
 | `scan_to_cloud2` | Converts `LaserScan` → `PointCloud2` |
 | `depthimage_to_laserscan` | Converts a cropped depth image row → fake `LaserScan` (`/turtlebot/fake_scan`) |
 
@@ -81,22 +119,37 @@ The robot builds a map with **RTAB-Map** (visual SLAM), selects unexplored front
 
 ### 1. Sensor Pipeline
 
-The **RealSense D435i** outputs full-resolution RGB and depth. `image_crop_node` produces two variants:
+`image_crop_node` takes the full-resolution RGB and depth from the RealSense D435i and produces two cropped variants from the depth stream:
 
-- **`image_cropped`** — bottom fraction removed (cuts out the floor) → fed to RTAB-Map
+- **`image_cropped`** — bottom fraction removed (cuts the floor) → used by RTAB-Map **in simulation only**
 - **`image_scan_cropped`** — top and bottom removed (cuts the robot arm and floor) → fed to `depthimage_to_laserscan`
 
-`depthimage_to_laserscan` converts that narrow depth slice into a `LaserScan` on `/turtlebot/fake_scan`, giving RTAB-Map a 2D range input without a dedicated LiDAR.
+`depthimage_to_laserscan` converts that narrow depth slice into a `LaserScan` on `/turtlebot/fake_scan`. This fake scan is the **only sensor input used for occupancy mapping and planning** on both simulation and real robot.
 
-Stonefish publishes the IMU in NED (North-East-Down) convention. `imu_ned_to_enu` negates yaw and ω_z before the data reaches the EKF. The `robot_localization` EKF node fuses wheel odometry (`/turtlebot/odom`) and the converted IMU heading to produce `/odometry/filtered`.
+**IMU (simulation only):** Stonefish publishes the IMU in NED (North-East-Down) convention. `imu_ned_to_enu` negates yaw and ω_z before the data reaches the EKF. The real robot's IMU already publishes in ENU — no conversion node is needed.
+
+The `robot_localization` EKF node fuses wheel odometry (`/turtlebot/odom`) with the (converted) IMU heading to produce `/odometry/filtered`, which is used by RTAB-Map and DWA.
 
 ### 2. Mapping
 
-**RTAB-Map** runs visual-inertial SLAM using cropped RGB-D + fake scan + EKF odometry. It publishes:
-- `/map` (`OccupancyGrid`) — live 2D occupancy map
-- TF transform `world_enu → turtlebot/base_footprint`
+The mapping approach differs significantly between simulation and real robot:
 
-The **global costmap** node (`occupancy_grid_original`) takes `/map` and re-publishes `/inflated_map`, expanding every occupied cell by `inflation_radius` (default 0.2 m) so planners maintain clearance from walls automatically.
+**Simulation — RTAB-Map:**
+
+RTAB-Map receives the cropped RGB-D images, fake laser scan, and EKF-fused odometry. It runs visual-inertial SLAM and publishes:
+- `/map` (`OccupancyGrid`) — live 2D occupancy map used for planning
+- A 3D point cloud of the environment
+- TF: `world_enu → turtlebot/base_footprint`
+
+The `occupancy_grid_original` node (in `grid_mapping`) subscribes to RTAB-Map's `/map` and publishes `/inflated_map` with all obstacles expanded by `inflation_radius` (0.2 m). This is what frontier detection and BiRRT\* consume.
+
+**Real Robot — Scan-based map (`scan_map_global`):**
+
+RTAB-Map was not reliable for planning on the real robot due to timestamp synchronisation issues between the RGB, depth, and scan streams. Instead, `scan_map_global` (in `grid_mapping`) builds the occupancy map **entirely from the fake 2D laser scan**, using log-odds ray-casting with Bresenham line tracing. It publishes both the raw map and the inflated costmap in a single node:
+- `/map_scan` — raw log-odds occupancy grid
+- `/inflated_map_scan` — obstacle-inflated version used directly by frontier detection and BiRRT\*
+
+Frontier node and path planner are remapped to consume `/map_scan` / `/inflated_map_scan` instead of `/map` / `/inflated_map`.
 
 ### 3. Exploration Loop
 
@@ -244,24 +297,13 @@ The launch sequence on the real robot:
 | 2 s | Image crop node, `depthimage_to_laserscan`, scan-based global map (`scan_map_global`), RViz |
 | 8 s | DWA local costmap, DWA service, frontier node, path planner |
 
-#### Key Differences from Simulation
+#### Notes
 
-On the real robot the pipeline is meaningfully different in several places:
-
-**Map source for planning** — In simulation, planning uses the RTAB-Map `/map` topic inflated by `grid_mapping`. On the real robot, `scan_map_global` builds a persistent occupancy grid directly from the fake LiDAR scan (depth image → `depthimage_to_laserscan`). This produces `/map_scan` and `/inflated_map_scan`, which frontier detection and path planning consume instead:
-
-```
-Sim:   RTAB-Map → /map          → grid_mapping → /inflated_map
-Real:  fake scan → scan_map_global → /map_scan  → /inflated_map_scan
-```
-
-**No IMU frame conversion** — The real robot's IMU already publishes in ENU; no `imu_ned_to_enu` node is needed.
-
-**No arm retract node** — `is_sim: false` means `arm_retract_node` responds to the `/arm/retract` service immediately with success without sending any joint commands.
-
-**Motor dead zone compensation** — Real Kobuki motors ignore small commands. The DWA params set `vel_deadzone_linear: 0.1` and `vel_deadzone_angular: 0.5` so any non-zero velocity command is boosted above the threshold automatically.
-
-**Topic names** — Real robot drivers omit the `turtlebot/` namespace prefix on some frames (`rplidar` not `turtlebot/rplidar`, `camera_link` not `turtlebot/camera_link`). The real robot config `exploration_real_params.yaml` sets `laser_frame: rplidar` and `map_frame: odom` to match.
+- RTAB-Map is still launched (for 3D point cloud visualisation) but its `/map` output is **not** used for planning. All planning runs off `/map_scan` and `/inflated_map_scan` from `scan_map_global`.
+- No `imu_ned_to_enu` node — the real IMU is already ENU.
+- No arm retract node — `is_sim: false` causes the service to return success immediately without sending any joint commands.
+- Motor dead zone: `vel_deadzone_linear: 0.1` and `vel_deadzone_angular: 0.5` boost small DWA commands above the Kobuki's dead band.
+- TF frame names use no `turtlebot/` prefix on real hardware (`rplidar`, `camera_link`, `odom`).
 
 ### Useful Commands
 
@@ -383,12 +425,17 @@ Stonefish also publishes a `world_ned` frame (NED convention). All planning and 
 |--------|-----------|-----------|
 | Map frame | `world_enu` | `odom` |
 | Laser frame | `turtlebot/rplidar` | `rplidar` |
-| Map topic | `/map` (RTAB-Map direct) | `/map` |
-| DWA `use_odom_velocity` | `false` (sim odom reports 0) | `true` |
-| DWA `use_depth_gate` | `false` | `true` |
+| Mapping node | RTAB-Map → `occupancy_grid_original` | `scan_map_global` (depth scan only — RTAB-Map sync issues) |
+| Raw map topic | `/map` | `/map_scan` |
+| Inflated map topic | `/inflated_map` | `/inflated_map_scan` |
+| Image crop used for planning | `image_scan_cropped` only | `image_scan_cropped` only |
+| Image crop used for SLAM | `image_cropped` → RTAB-Map | not used for planning |
+| IMU conversion | `imu_ned_to_enu` (NED→ENU) | not needed (real IMU is ENU) |
 | Arm retraction | Active (`is_sim: true`) | No-op (no arm fitted) |
-| IMU conversion | `imu_ned_to_enu` node needed | Raw IMU already ENU |
-| Localization | `robot_localization` EKF | `robot_localization` EKF (or custom `localization` node) |
+| DWA `use_odom_velocity` | `false` (sim odom reports 0) | `false` |
+| DWA `use_depth_gate` | `false` | `true` |
+| Motor dead zone | 0 | `linear: 0.1 m/s`, `angular: 0.5 rad/s` |
+| Localization | `robot_localization` EKF (odom + IMU) | `robot_localization` EKF (odom + IMU) |
 
 ---
 
@@ -418,8 +465,8 @@ src/
 │       └── occupancy_grid_local.py ← Local inflated costmap for DWA
 │
 ├── dwa_interfaces/                 ← ComputeVelocity.srv
-├── grid_mapping/                   ← /map → /inflated_map obstacle inflation
-├── image_utils/                    ← Camera crop + RTAB-Map time-sync
+├── grid_mapping/                   ← Sim: inflate RTAB-Map /map; Real: scan_map_global (builds + inflates from fake scan)
+├── image_utils/                    ← Camera crop (depth scan crop used in both; color crop used in sim only)
 ├── localization/                   ← Custom EKF odometry (real robot)
 ├── scan_to_cloud2/                 ← LaserScan → PointCloud2
 ├── depthimage_to_laserscan/        ← Depth image → fake LaserScan (vendored)
