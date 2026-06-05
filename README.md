@@ -206,12 +206,62 @@ The launch file staggers node startup automatically:
 
 ### Real Robot
 
+#### Step 1 — Hardware Drivers (before the launch file)
+
+These must be running **before** `turtlebot_real_test.launch.py` is launched. Start each in its own terminal:
+
+```bash
+# Terminal 1 — Kobuki base (publishes /turtlebot/odom, /turtlebot/joint_states, cmd_vel)
+ros2 launch kobuki_ros kobuki.launch.py
+
+# Terminal 2 — RealSense D435i camera driver
+ros2 launch realsense2_camera rs_launch.py \
+    camera_namespace:=turtlebot \
+    camera_name:=camera \
+    enable_depth:=true \
+    enable_color:=true \
+    align_depth.enable:=true
+
+# Terminal 3 — EKF-based odometry (robot_localization, fuses wheel odom)
+#   This is already included in turtlebot_real_test.launch.py — no need to
+#   launch it separately unless you want to test localisation in isolation.
+```
+
+> The RealSense driver publishes color on `/turtlebot/camera/color/image_compressed` and depth on `/turtlebot/camera/depth/image_rect_raw`. These are remapped inside the launch file automatically.
+
+#### Step 2 — Launch the Planning Stack
+
 ```bash
 source install/setup.bash
 ros2 launch online_motion_planning turtlebot_real_test.launch.py
 ```
 
-> On the real robot the map frame is `odom` (not `world_enu`), the laser frame is `rplidar` (no `turtlebot/` prefix), `use_odom_velocity: true` in the DWA params, and `use_depth_gate: true` so the DWA pauses if the camera stalls.
+The launch sequence on the real robot:
+
+| Delay | What starts |
+|-------|------------|
+| 0 s | EKF node (`robot_localization`), RTAB-Map (in its own xterm window) |
+| 2 s | Image crop node, `depthimage_to_laserscan`, scan-based global map (`scan_map_global`), RViz |
+| 8 s | DWA local costmap, DWA service, frontier node, path planner |
+
+#### Key Differences from Simulation
+
+On the real robot the pipeline is meaningfully different in several places:
+
+**Map source for planning** — In simulation, planning uses the RTAB-Map `/map` topic inflated by `grid_mapping`. On the real robot, `scan_map_global` builds a persistent occupancy grid directly from the fake LiDAR scan (depth image → `depthimage_to_laserscan`). This produces `/map_scan` and `/inflated_map_scan`, which frontier detection and path planning consume instead:
+
+```
+Sim:   RTAB-Map → /map          → grid_mapping → /inflated_map
+Real:  fake scan → scan_map_global → /map_scan  → /inflated_map_scan
+```
+
+**No IMU frame conversion** — The real robot's IMU already publishes in ENU; no `imu_ned_to_enu` node is needed.
+
+**No arm retract node** — `is_sim: false` means `arm_retract_node` responds to the `/arm/retract` service immediately with success without sending any joint commands.
+
+**Motor dead zone compensation** — Real Kobuki motors ignore small commands. The DWA params set `vel_deadzone_linear: 0.1` and `vel_deadzone_angular: 0.5` so any non-zero velocity command is boosted above the threshold automatically.
+
+**Topic names** — Real robot drivers omit the `turtlebot/` namespace prefix on some frames (`rplidar` not `turtlebot/rplidar`, `camera_link` not `turtlebot/camera_link`). The real robot config `exploration_real_params.yaml` sets `laser_frame: rplidar` and `map_frame: odom` to match.
 
 ### Useful Commands
 
